@@ -27,16 +27,19 @@ def test_init_creates_config_and_db(
     assert cfg.exists()
     assert db.exists()
 
-    # The schema-version stamp is present and WAL mode took effect.
+    # Migrations ran (alembic_version stamped), the schema exists, WAL is on.
     conn = sqlite3.connect(db)
     try:
-        version = conn.execute(
-            "SELECT value FROM _kvseo_meta WHERE key = 'schema_version'"
-        ).fetchone()
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
     finally:
         conn.close()
-    assert version is not None
+    assert version is not None and version[0] == "0001"
+    assert "audit_runs" in tables
     assert journal_mode[0].lower() == "wal"
 
 

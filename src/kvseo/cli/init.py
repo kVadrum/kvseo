@@ -6,7 +6,7 @@ import typer
 
 from kvseo.config import paths
 from kvseo.config.settings import DEFAULT_CONFIG_TOML
-from kvseo.storage.db import init_db
+from kvseo.storage.db import migrate
 
 
 def init() -> None:
@@ -22,10 +22,8 @@ def init() -> None:
         typer.echo(f"wrote config: {cfg_file}")
 
     db = paths.db_path()
-    if db.exists():
-        typer.echo(f"database already present: {db}")
-    else:
-        init_db(db)
-        typer.echo(f"initialised database: {db}")
+    existed = db.exists()
+    migrate(db)  # alembic upgrade head — idempotent
+    typer.echo(f"{'migrated' if existed else 'initialised'} database: {db}")
 
     typer.echo("kvseo is ready. Next: connect a data source with `kvseo connect gsc`.")
