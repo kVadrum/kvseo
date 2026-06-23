@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kvseo"
+description = "An AI-native SEO copilot for solo operators and small agencies — the AI layer over your existing SEO stack."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "kVadrum" }]
+keywords = ["seo", "audit", "llm", "ai", "cli", "search-console", "core-web-vitals"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Site Management",
+]
+# Canonical version literal — /bump and bump-audit.sh target this field.
+version = "0.0.0"
+
+# Runtime dependencies. The advisor (LiteLLM) is core IP per ADR-002; storage
+# is SQLAlchemy + Alembic per ADR-003. Bounds are deliberately loose for the
+# scaffold; LiteLLM gets a minor-pin once a snapshot baseline exists (ADR-002,
+# risk R7).
+dependencies = [
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "litellm>=1.40,<2",
+    "jinja2>=3.1",
+    "markdown>=3.6",
+    "selectolax>=0.3.21",
+    "platformdirs>=4.2",
+    "keyring>=25",
+]
+
+[project.optional-dependencies]
+# PDF rendering lands in v0.2 (ADR-005); declared here so the extra name is
+# stable from day one. Not installed by default.
+pdf = ["playwright>=1.44"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-Markdown",
+]
+
+[project.scripts]
+kvseo = "kvseo.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/kvadrum/kvseo"
+Repository = "https://github.com/kvadrum/kvseo"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kvseo"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PTH", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/kvseo"]
+# selectolax / litellm ship partial or no type stubs; don't fail strict on them.
+[[tool.mypy.overrides]]
+module = ["selectolax.*", "litellm.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
