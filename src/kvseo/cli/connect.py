@@ -99,6 +99,9 @@ def csv(
     except ValueError as exc:
         typer.secho(f"bad date: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
+    if start and end and start > end:
+        typer.secho(f"--from ({start}) is after --to ({end}).", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
 
     db = paths.db_path()
     migrate(db)

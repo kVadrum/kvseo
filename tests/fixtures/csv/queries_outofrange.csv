@@ -1,0 +1,6 @@
+Query,Landing Page,Clicks,Impressions,CTR,Position
+ctr over 100 percent,https://kemek.net/a,5,100,250%,3.0
+negative clicks,https://kemek.net/b,-5,100,5%,3.0
+good one,https://kemek.net/c,5,100,5%,3.0
+good two,https://kemek.net/d,3,80,4%,8.0
+good three,https://kemek.net/e,9,200,4.5%,5.5

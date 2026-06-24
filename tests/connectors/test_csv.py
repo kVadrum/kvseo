@@ -97,6 +97,23 @@ async def test_too_many_failures_rolls_back(tmp_path: Path) -> None:
         assert s.scalar(select(func.count()).select_from(GscQueryORM)) == 0
 
 
+async def test_out_of_range_values_become_row_errors(tmp_path: Path) -> None:
+    # A CTR > 100% and a negative click count must be rejected per-row (the
+    # GscQueryRow bounds), not persisted as poisoned advisor evidence. The three
+    # valid rows still commit (2/5 fail, under the 50% threshold).
+    engine = _engine(tmp_path)
+    conn = CsvConnector(engine=engine)
+    result = await conn.import_csv(FIXTURES / "queries_outofrange.csv", site=SITE)
+
+    assert result.committed is True
+    assert (result.total_rows, result.imported, result.failed) == (5, 3, 2)
+    assert {e.row for e in result.errors} == {2, 3}  # the ctr-over-100 and negative-clicks rows
+    with Session(engine) as s:
+        rows = s.scalars(select(GscQueryORM)).all()
+    assert len(rows) == 3
+    assert all(0.0 <= r.ctr <= 1.0 and r.clicks >= 0 for r in rows)
+
+
 async def test_unmappable_header_raises(tmp_path: Path) -> None:
     conn = CsvConnector(engine=_engine(tmp_path))
     with pytest.raises(CsvImportError, match="could not map"):

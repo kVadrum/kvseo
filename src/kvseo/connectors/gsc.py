@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -41,12 +41,17 @@ class GscSite(BaseModel):
 
 
 class GscQueryRow(BaseModel):
+    # Bounds are enforced (not just documented) because the CSV connector routes
+    # hand-made files through this model: a malformed export (negative clicks,
+    # a CTR that parsed out of range) must become a per-row validation error,
+    # not silently-persisted evidence the advisor later cites. These invariants
+    # hold for live GSC data too — ctr = clicks/impressions is always in [0, 1].
     query: str
     page: str
-    clicks: int
-    impressions: int
-    ctr: float  # 0.0-1.0
-    position: float  # average position
+    clicks: int = Field(ge=0)
+    impressions: int = Field(ge=0)
+    ctr: float = Field(ge=0.0, le=1.0)
+    position: float = Field(ge=0.0)  # average SERP position
     date_range_start: date
     date_range_end: date
 
