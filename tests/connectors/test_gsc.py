@@ -123,6 +123,27 @@ async def test_refresh_bypasses_cache(tmp_path: Path) -> None:
         assert s.scalar(select(func.count()).select_from(GscQueryORM)) == 4
 
 
+async def test_different_date_range_misses_cache(tmp_path: Path) -> None:
+    # Same site/URL but a different period must NOT serve the prior range's rows
+    # from cache (even within the freshness window) — it must fetch the requested
+    # period afresh, or callers get metrics mislabeled with the wrong dates.
+    db = tmp_path / "kvseo.db"
+    migrate(db)
+    engine = get_engine(db)
+    await GscConnector(
+        access_token="tok", engine=engine, client=_client(QUERIES_PAYLOAD)
+    ).queries_for_url(SITE, URL, START, END)
+
+    other_start, other_end = date(2026, 1, 1), date(2026, 1, 31)
+    rows = await GscConnector(
+        access_token="tok", engine=engine, client=_client(QUERIES_PAYLOAD)
+    ).queries_for_url(SITE, URL, other_start, other_end)
+
+    assert rows[0].date_range_start == other_start  # the requested period, fetched fresh
+    with Session(engine) as s:
+        assert s.scalar(select(func.count()).select_from(GscQueryORM)) == 4  # refetched, not cache-served
+
+
 async def test_not_connected_raises_auth_error() -> None:
     conn = GscConnector(access_token=None, client=_client(SITES_PAYLOAD))
     with pytest.raises(ConnectorAuthError):

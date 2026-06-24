@@ -93,7 +93,7 @@ class GscConnector:
     ) -> list[GscQueryRow]:
         """Per-query metrics for a single page over a date range."""
         if not refresh and self._engine is not None:
-            cached = self._cached_for_url(site, url, freshness)
+            cached = self._cached_for_url(site, url, start, end, freshness)
             if cached is not None:
                 return cached
         raw = await self._search_analytics(
@@ -221,6 +221,11 @@ class GscConnector:
     def _persist(self, site: str, rows: list[GscQueryRow]) -> None:
         if self._engine is None or not rows:
             return
+        # Stamp every row in the batch with one timestamp computed once, rather
+        # than the per-row ``datetime('now')`` server default: _cached_for_url
+        # reads back the rows matching max(fetched_at), so a batch that straddled
+        # a 1-second boundary would otherwise return only its last-second subset.
+        fetched_at = datetime.now(UTC).strftime(_SQLITE_TS)
         with Session(self._engine) as session:
             session.add_all(
                 GscQueryORM(
@@ -233,19 +238,27 @@ class GscConnector:
                     position=r.position,
                     range_start=r.date_range_start.isoformat(),
                     range_end=r.date_range_end.isoformat(),
+                    fetched_at=fetched_at,
                 )
                 for r in rows
             )
             session.commit()
 
     def _cached_for_url(
-        self, site: str, url: str, freshness: timedelta
+        self, site: str, url: str, start: date, end: date, freshness: timedelta
     ) -> list[GscQueryRow] | None:
         assert self._engine is not None
+        # The cache key includes the requested date range: the same URL fetched
+        # for a different period must miss, not hand back the prior range's rows
+        # mislabeled as the requested one.
+        range_start, range_end = start.isoformat(), end.isoformat()
         with Session(self._engine) as session:
             latest = session.scalar(
                 select(func.max(GscQueryORM.fetched_at)).where(
-                    GscQueryORM.page == url, GscQueryORM.site_origin == site
+                    GscQueryORM.page == url,
+                    GscQueryORM.site_origin == site,
+                    GscQueryORM.range_start == range_start,
+                    GscQueryORM.range_end == range_end,
                 )
             )
             if latest is None:
@@ -257,6 +270,8 @@ class GscConnector:
                 select(GscQueryORM).where(
                     GscQueryORM.page == url,
                     GscQueryORM.site_origin == site,
+                    GscQueryORM.range_start == range_start,
+                    GscQueryORM.range_end == range_end,
                     GscQueryORM.fetched_at == latest,
                 )
             ).all()

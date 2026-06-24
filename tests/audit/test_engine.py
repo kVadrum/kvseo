@@ -76,6 +76,29 @@ async def test_run_audit_integrates_cwv(tmp_path: Path) -> None:
     assert by_id["cwv.cls"].verdict == "pass"
 
 
+async def test_run_audit_http_error_marks_failed(tmp_path: Path) -> None:
+    # A 404/500 page is an HTTP error (spec 04 §3): the audit must fail and
+    # abort, never score the error page or write check rows.
+    db = tmp_path / "kvseo.db"
+    migrate(db)
+    engine = get_engine(db)
+    result = await run_audit(URL, db_engine=engine, fetch_client=_fetch_client(status=404), psi=None)
+
+    assert result.status == "failed"
+    assert result.failure_reason == "http_404"
+    assert result.score is None
+    assert result.page_status_code == 404
+    assert result.checks == []
+
+    with Session(engine) as s:
+        run = s.scalars(select(AuditRunORM)).one()
+        assert run.status == "failed"
+        assert run.failure_reason == "http_404"
+        assert run.page_status_code == 404
+        assert run.score is None
+        assert s.scalar(select(func.count()).select_from(AuditCheckORM)) == 0
+
+
 async def test_run_audit_fetch_failure_marks_failed(tmp_path: Path) -> None:
     db = tmp_path / "kvseo.db"
     migrate(db)

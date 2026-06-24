@@ -74,12 +74,32 @@ async def run_audit(
             page_title=None, page_status_code=None, fetch_duration_ms=None,
         )
 
+    # Spec 04 §3: a non-2xx response is an HTTP error — fail and abort before
+    # scoring. Otherwise the audit reports on-page scores for a 404/500 error
+    # page as if it were the real page (a 404 is itself the worst SEO outcome).
+    if fetched.status_code >= 400:
+        reason = f"http_{fetched.status_code}"
+        _mark_failed(
+            db_engine, audit_id, reason,
+            fetched_url=fetched.final_url, status_code=fetched.status_code,
+            duration_ms=fetched.duration_ms,
+        )
+        return AuditResult(
+            id=audit_id, url=url, fetched_url=fetched.final_url, status="failed",
+            failure_reason=reason, keyword=keyword, score=None,
+            page_title=None, page_status_code=fetched.status_code,
+            fetch_duration_ms=fetched.duration_ms,
+        )
+
     doc = ParsedDocument(fetched.html, fetched.final_url)
 
     psi_result = None
     if psi is not None:
         try:
-            psi_result = await psi.core_web_vitals(url)
+            # Use the post-redirect URL so CWV and the on-page checks describe
+            # the same page (PSI resolves redirects itself, but this keeps the
+            # two halves of the audit pointed at one URL).
+            psi_result = await psi.core_web_vitals(fetched.final_url)
         except ConnectorError:
             psi_result = None  # cwv.* checks skip; the score covers the rest
 
@@ -124,12 +144,28 @@ def _insert_running(engine: Engine, audit_id: uuid.UUID, url: str, keyword: str 
         session.commit()
 
 
-def _mark_failed(engine: Engine, audit_id: uuid.UUID, reason: str) -> None:
+def _mark_failed(
+    engine: Engine,
+    audit_id: uuid.UUID,
+    reason: str,
+    *,
+    fetched_url: str | None = None,
+    status_code: int | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    # The transport-failure path has no response (all None); the HTTP-error
+    # path passes what it got so the stored run records the 404/500.
     with Session(engine) as session:
         run = session.get(AuditRunORM, audit_id)
         if run is not None:
             run.status = "failed"
             run.failure_reason = reason
+            if fetched_url is not None:
+                run.fetched_url = fetched_url
+            if status_code is not None:
+                run.page_status_code = status_code
+            if duration_ms is not None:
+                run.fetch_duration_ms = duration_ms
             run.completed_at = _now()
             session.commit()
 

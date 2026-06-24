@@ -100,5 +100,11 @@ def test_cwv_checks(good: ParsedDocument) -> None:
     assert cwv.cwv_lcp(good, bad).verdict == "fail"
     assert cwv.cwv_cls(good, bad).verdict == "fail"
 
+    # Google's "good" bands are inclusive: a value exactly on the boundary passes.
+    boundary = AuditContext(fetched_url=_BASE, psi_result=_psi(lcp=2500, inp=200, cls=0.1))
+    assert cwv.cwv_lcp(good, boundary).verdict == "pass"
+    assert cwv.cwv_inp(good, boundary).verdict == "pass"
+    assert cwv.cwv_cls(good, boundary).verdict == "pass"
+
     # No PSI → cwv checks skip.
     assert cwv.cwv_lcp(good, _ctx()).verdict == "skip"

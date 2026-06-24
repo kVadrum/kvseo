@@ -10,13 +10,19 @@ from __future__ import annotations
 import contextlib
 
 import keyring
-from keyring.errors import PasswordDeleteError
+from keyring.errors import KeyringError, PasswordDeleteError
 
 _SERVICE = "kvseo"
 
 
 def get_secret(key: str) -> str | None:
-    return keyring.get_password(_SERVICE, key)
+    # A headless/CI box with no OS keyring backend raises NoKeyringError here.
+    # Treat "no backend" as "no secret": callers fall back to env vars or run
+    # keyless (e.g. PSI works without a key), instead of crashing the command.
+    try:
+        return keyring.get_password(_SERVICE, key)
+    except KeyringError:
+        return None
 
 
 def set_secret(key: str, value: str) -> None:
