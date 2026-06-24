@@ -7,7 +7,11 @@ stubbed so the CLI surface (handoff §3 item 4 / Q3) is reviewable now.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import typer
+
+from kvseo.config.secrets import set_secret
 
 app = typer.Typer(
     help="Connect kvseo to a read-only data source.", no_args_is_help=True
@@ -31,6 +35,18 @@ def gsc() -> None:
 
 
 @app.command()
-def psi() -> None:
-    """Connect the PageSpeed Insights API (API key)."""
-    _not_yet("psi")
+def psi(
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", help="Your PageSpeed Insights API key (free tier: 25k/day)."),
+    ] = None,
+) -> None:
+    """Connect the PageSpeed Insights API by storing your API key."""
+    if api_key:
+        set_secret("psi:api_key", api_key)
+        typer.echo("Stored your PSI API key — it'll be used on your next audit.")
+    else:
+        typer.echo(
+            "No --api-key given. PSI works without a key at lower rate limits; "
+            "pass --api-key to raise your quota."
+        )

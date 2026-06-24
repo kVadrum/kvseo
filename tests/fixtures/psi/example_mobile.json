@@ -1,0 +1,36 @@
+{
+  "loadingExperience": {
+    "metrics": {
+      "LARGEST_CONTENTFUL_PAINT_MS": { "percentile": 2100 },
+      "INTERACTION_TO_NEXT_PAINT": { "percentile": 180 },
+      "CUMULATIVE_LAYOUT_SHIFT_SCORE": { "percentile": 8 }
+    },
+    "origin_fallback": false
+  },
+  "lighthouseResult": {
+    "categories": { "performance": { "score": 0.86 } },
+    "audits": {
+      "largest-contentful-paint": { "title": "LCP", "numericValue": 2450.0 },
+      "total-blocking-time": { "title": "TBT", "numericValue": 120.0 },
+      "cumulative-layout-shift": { "title": "CLS", "numericValue": 0.05 },
+      "unused-css-rules": {
+        "title": "Reduce unused CSS",
+        "description": "Remove dead rules.",
+        "score": 0.5,
+        "details": { "type": "opportunity", "overallSavingsMs": 300 }
+      },
+      "render-blocking-resources": {
+        "title": "Eliminate render-blocking resources",
+        "description": "Resources are blocking the first paint.",
+        "score": 0.7,
+        "details": { "type": "opportunity", "overallSavingsMs": 450 }
+      },
+      "uses-long-cache-ttl": {
+        "title": "Serve static assets with an efficient cache policy",
+        "description": "A long cache lifetime speeds up repeat visits.",
+        "score": 0.9,
+        "details": { "type": "table", "items": [] }
+      }
+    }
+  }
+}
