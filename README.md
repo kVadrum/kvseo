@@ -61,9 +61,12 @@ pip install -e ".[dev]"
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright © 2026 KeMeK Network.
+[MIT](./LICENSE) — free to use, modify, and distribute. KeMeK Network © 2026.
 
-"kvseo" and "kVadrum" are trademarks of KeMeK Network; the MIT license covers
-the code, not the marks.
+### Trademarks
 
-A [kVadrum](https://kvadrum.com) Lab project.
+The "kvseo" and "kVadrum" names are trademarks of KeMeK Network. They are not
+covered by the MIT license, and no rights to use the names are granted by this
+repository. Independent forks must replace the brand name with their own.
+
+A [kVadrum](https://kvadrum.com) Lab project, built in public.
