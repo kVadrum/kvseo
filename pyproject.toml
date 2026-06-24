@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Site Management",
 ]
 # Canonical version literal — /bump and bump-audit.sh target this field.
-version = "0.2.0"
+version = "0.3.0"
 
 # Runtime dependencies. The advisor (LiteLLM) is core IP per ADR-002; storage
 # is SQLAlchemy + Alembic per ADR-003. Bounds are deliberately loose for the
@@ -40,6 +40,8 @@ dependencies = [
     "selectolax>=0.3.21",
     "platformdirs>=4.2",
     "keyring>=25",
+    "google-auth>=2.29",
+    "google-auth-oauthlib>=1.2",
 ]
 
 [project.optional-dependencies]
@@ -80,9 +82,9 @@ strict = true
 files = ["src/kvseo"]
 # Alembic env/versions use dynamic context objects; not worth strict-typing.
 exclude = ["^src/kvseo/storage/migrations/"]
-# selectolax / litellm ship partial or no type stubs; don't fail strict on them.
+# These ship partial or no type stubs; don't fail strict on them.
 [[tool.mypy.overrides]]
-module = ["selectolax.*", "litellm.*"]
+module = ["selectolax.*", "litellm.*", "google.*", "google_auth_oauthlib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
