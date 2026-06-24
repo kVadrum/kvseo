@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kvseo audit — {{ url }}</title>
+<style>
+  /* ── kvseo audit report ───────────────────────────────────────────────
+     Self-contained editorial "dossier": warm paper, ink type, one burnt-
+     sienna accent. System fonts only (no external requests), lifted toward
+     character by a serif display stack. Built to print clean to PDF.        */
+  :root {
+    --paper:   #f3eee4;
+    --sheet:   #fffdf9;
+    --ink:     #211c17;
+    --muted:   #6f655a;
+    --rule:    #e6ded0;
+    --rule-bold: #d6ccb8;
+    --accent:  #b3541e;
+    --accent-soft: #f0e0d2;
+    --pass:    #2f6f43;
+    --warn:    #a8780f;
+    --fail:    #9e2f23;
+    --skip:    #8c8377;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, Cambria, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background-color: var(--paper);
+    background-image:
+      radial-gradient(120% 80% at 50% -10%, rgba(179,84,30,0.05), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(33,28,23,0.014) 0 1px, transparent 1px 4px);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+    padding: 40px 20px 64px;
+  }
+  .sheet {
+    max-width: 860px;
+    margin: 0 auto;
+    background: var(--sheet);
+    border: 1px solid var(--rule-bold);
+    box-shadow: 0 1px 0 rgba(33,28,23,0.04), 0 24px 60px -28px rgba(33,28,23,0.32);
+    padding: 56px 60px 48px;
+  }
+
+  /* Masthead */
+  .masthead { display:flex; justify-content:space-between; align-items:baseline; gap:16px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
+  .masthead .brand { color: var(--accent); font-weight: 600; }
+  .masthead .brand b { color: var(--ink); font-weight: 600; }
+  h1.url {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4.4vw, 42px);
+    line-height: 1.1; letter-spacing: -0.01em; margin: 18px 0 6px; word-break: break-word;
+  }
+  .page-title { font-family: var(--serif); font-style: italic; color: var(--muted); font-size: 18px; margin: 0 0 4px; }
+  .subline { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .subline .kw { color: var(--accent); }
+  .rule { height:1px; background: var(--rule-bold); border:0; margin: 26px 0; }
+  .rule.thin { background: var(--rule); margin: 20px 0; }
+
+  /* Section heading */
+  .sec { font-family: var(--mono); font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--accent); margin: 38px 0 16px; display:flex; align-items:center; gap:12px; }
+  .sec::after { content:""; flex:1; height:1px; background: var(--rule); }
+  .sec .n { color: var(--muted); }
+
+  /* Score band */
+  .scoreband { display:flex; gap:40px; align-items:center; flex-wrap:wrap; }
+  .score { flex: 0 0 auto; }
+  .score .num { font-family: var(--serif); font-size: 76px; line-height:0.92; font-weight: 600; letter-spacing:-0.02em; }
+  .score .den { font-family: var(--serif); font-size: 26px; color: var(--muted); }
+  .score .band { font-family: var(--mono); font-size: 11px; letter-spacing:0.2em; text-transform:uppercase; margin-top:8px; }
+  .meter { height:8px; background: var(--rule); border-radius:1px; margin-top:14px; width:230px; overflow:hidden; }
+  .meter > span { display:block; height:100%; }
+  .band-excellent, .band-excellent .num { color: var(--pass); }
+  .band-good, .band-good .num { color: #4a7a3e; }
+  .band-fair, .band-fair .num { color: var(--warn); }
+  .band-poor, .band-poor .num { color: var(--fail); }
+  .band-na, .band-na .num { color: var(--skip); }
+  .fill-excellent { background: var(--pass); }
+  .fill-good { background: #4a7a3e; }
+  .fill-fair { background: var(--warn); }
+  .fill-poor { background: var(--fail); }
+
+  .counts { display:flex; gap:0; flex:1; min-width:300px; border:1px solid var(--rule); }
+  .counts .cell { flex:1; padding:14px 8px; text-align:center; border-right:1px solid var(--rule); }
+  .counts .cell:last-child { border-right:0; }
+  .counts .cell .v { font-family: var(--serif); font-size:30px; font-weight:600; line-height:1; }
+  .counts .cell .l { font-family: var(--mono); font-size:10px; letter-spacing:0.16em; text-transform:uppercase; color:var(--muted); margin-top:6px; }
+  .v-pass { color: var(--pass); } .v-warn { color: var(--warn); }
+  .v-fail { color: var(--fail); } .v-skip { color: var(--skip); }
+
+  /* Advisor actions */
+  .action { display:grid; grid-template-columns: 44px 1fr; gap:18px; padding:20px 0; border-top:1px solid var(--rule); }
+  .action:first-of-type { border-top:0; }
+  .action .rank { font-family: var(--serif); font-size:30px; font-weight:600; color: var(--accent); line-height:1; text-align:right; }
+  .action .atitle { font-family: var(--serif); font-size:21px; font-weight:600; line-height:1.15; margin:0 0 8px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  .chip { font-family: var(--mono); font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+    padding:3px 8px; border:1px solid var(--rule-bold); border-radius:2px; color:var(--muted); }
+  .chip.impact-high { color:var(--fail); border-color:#e2c2bd; background:#fbf1ef; }
+  .chip.impact-medium { color:var(--warn); border-color:#e7d6ab; background:#fbf5e6; }
+  .chip.impact-low { color:var(--muted); }
+  .chip.cat { color:var(--accent); border-color:var(--accent-soft); background:#fbf1e8; }
+  .action p { margin:0 0 8px; }
+  .action .why { color:var(--muted); font-size:15px; }
+  .evidence { margin-top:8px; }
+  .evidence .tag { font-family: var(--mono); font-size:11px; color:var(--accent); margin-right:10px; white-space:nowrap; }
+  .evidence .lbl { font-family: var(--mono); font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:var(--muted); margin-right:8px; }
+  .well { margin:18px 0 0; padding:0; list-style:none; }
+  .well li { padding:6px 0 6px 22px; position:relative; }
+  .well li::before { content:"+"; position:absolute; left:0; color:var(--pass); font-family:var(--mono); }
+  .cautions li::before { content:"!"; color:var(--warn); }
+  .summary { font-size:17px; line-height:1.6; margin:0 0 22px; }
+  .summary p { margin:0 0 12px; }
+
+  .notice { background: var(--accent-soft); border-left:3px solid var(--accent); padding:14px 18px;
+    font-size:14px; color:#7a4422; }
+  .notice code { font-family: var(--mono); font-size:13px; }
+
+  /* Core Web Vitals */
+  .vitals { display:flex; gap:14px; flex-wrap:wrap; }
+  .vital { flex:1; min-width:150px; border:1px solid var(--rule); padding:16px 18px; }
+  .vital .vl { font-family:var(--mono); font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:var(--muted); }
+  .vital .vv { font-family:var(--serif); font-size:34px; font-weight:600; line-height:1; margin:8px 0 4px; }
+  .vital .vsub { font-family:var(--mono); font-size:11px; color:var(--muted); }
+  .rate-good .vv { color:var(--pass); }
+  .rate-ni .vv { color:var(--warn); }
+  .rate-poor .vv { color:var(--fail); }
+  .rate-na .vv { color:var(--skip); }
+  .lab-line { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:14px; }
+  .lab-line b { color:var(--ink); }
+
+  /* Check lists */
+  .checkrow { display:grid; grid-template-columns: 200px 1fr; gap:16px; padding:10px 0; border-top:1px solid var(--rule); align-items:baseline; }
+  .checkrow:first-of-type { border-top:0; }
+  .checkrow .cid { font-family:var(--mono); font-size:13px; }
+  .cid-fail { color:var(--fail); } .cid-warn { color:var(--warn); }
+  .checkrow .cmsg { color:var(--ink); font-size:15px; }
+  .tagcloud { display:flex; flex-wrap:wrap; gap:6px 8px; }
+  .tagcloud .t { font-family:var(--mono); font-size:11px; color:var(--muted); border:1px solid var(--rule); padding:2px 7px; border-radius:2px; }
+  .muted { color:var(--muted); }
+
+  footer { margin-top:44px; padding-top:18px; border-top:1px solid var(--rule-bold);
+    font-family:var(--mono); font-size:11px; color:var(--muted); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+
+  @media (max-width: 620px) {
+    body { padding: 12px 0 32px; }
+    .sheet { padding: 32px 22px; border-left:0; border-right:0; }
+    .checkrow { grid-template-columns: 1fr; gap:2px; }
+  }
+  @media print {
+    body { background:#fff; padding:0; font-size:12pt; }
+    .sheet { box-shadow:none; border:0; max-width:none; padding:0 8mm; }
+    .action, .vital, .notice { break-inside: avoid; }
+    .sec { break-after: avoid; }
+  }
+</style>
+</head>
+<body>
+<main class="sheet">
+
+  <div class="masthead">
+    <div class="brand"><b>kvseo</b> · SEO Audit</div>
+    <div>{{ generated_at }}</div>
+  </div>
+
+  <h1 class="url">{{ url }}</h1>
+  {% if page_title %}<p class="page-title">{{ page_title }}</p>{% endif %}
+  <p class="subline">
+    {% if fetched_url and fetched_url != url %}resolved → {{ fetched_url }} · {% endif %}
+    audited {{ fetched_at }}{% if keyword %} · target keyword <span class="kw">“{{ keyword }}”</span>{% endif %}
+  </p>
+
+  {% if status != "complete" %}
+  <hr class="rule">
+  <div class="notice">This audit did not complete (status: <code>{{ status }}</code>). The summary below is partial.</div>
+  {% endif %}
+
+  <hr class="rule">
+
+  <!-- Score band -->
+  <div class="scoreband">
+    <div class="score band-{{ score_band }}">
+      <span class="num">{{ score if score is not none else "—" }}</span><span class="den">/100</span>
+      <div class="band">{{ score_band if score_band != "na" else "not scored" }}</div>
+      {% if score is not none %}
+      <div class="meter"><span class="fill-{{ score_band }}" style="width: {{ score }}%"></span></div>
+      {% endif %}
+    </div>
+    <div class="counts">
+      <div class="cell"><div class="v v-fail">{{ counts.fail }}</div><div class="l">Failed</div></div>
+      <div class="cell"><div class="v v-warn">{{ counts.warn }}</div><div class="l">Warned</div></div>
+      <div class="cell"><div class="v v-pass">{{ counts.pass }}</div><div class="l">Passed</div></div>
+      <div class="cell"><div class="v v-skip">{{ counts.skip }}</div><div class="l">Skipped</div></div>
+    </div>
+  </div>
+
+  <!-- Prioritized actions (advisor) -->
+  <div class="sec"><span class="n">01</span> Prioritized actions</div>
+  {% if advisor %}
+    {% if advisor.summary %}
+    <div class="summary">
+      {% for para in advisor.summary | paragraphs %}<p>{{ para }}</p>{% endfor %}
+    </div>
+    {% endif %}
+    {% for a in advisor.actions %}
+    <div class="action">
+      <div class="rank">{{ a.rank }}</div>
+      <div>
+        <h3 class="atitle">{{ a.title }}</h3>
+        <div class="chips">
+          <span class="chip impact-{{ a.expected_impact }}">{{ a.expected_impact }} impact</span>
+          <span class="chip">{{ a.effort }} effort</span>
+          <span class="chip cat">{{ a.category | replace("_", " ") }}</span>
+        </div>
+        <p>{{ a.description }}</p>
+        <p class="why">{{ a.rationale }}</p>
+        {% if a.evidence %}
+        <div class="evidence"><span class="lbl">Evidence</span>{% for e in a.evidence %}<span class="tag">{{ e }}</span>{% endfor %}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+    {% if advisor.things_going_well %}
+    <ul class="well">
+      {% for w in advisor.things_going_well %}<li>{{ w }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% if advisor.cautions %}
+    <ul class="well cautions">
+      {% for c in advisor.cautions %}<li>{{ c }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  {% elif advisor_status %}
+    <div class="notice">The advisor ran but returned no usable output (status: <code>{{ advisor_status }}</code>). Re-run with <code>kvseo advisor run {{ run_id }}</code>.</div>
+  {% else %}
+    <div class="notice">No AI recommendations were generated for this audit. Run <code>kvseo advisor run {{ run_id }}</code> with a provider key configured to add a prioritized action plan.</div>
+  {% endif %}
+
+  <!-- Core Web Vitals -->
+  {% if cwv %}
+  <div class="sec"><span class="n">02</span> Core Web Vitals</div>
+  <div class="vitals">
+    {% for m in cwv %}
+    <div class="vital rate-{{ m.rating }}">
+      <div class="vl">{{ m.label }}</div>
+      <div class="vv">{{ m.field if m.field else (m.lab if m.lab else "—") }}</div>
+      <div class="vsub">
+        {% if m.source == "field" %}field data{% elif m.source == "lab" %}lab only{% else %}no data{% endif %}
+        {% if m.field and m.lab %} · lab {{ m.lab }}{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% if lab_performance is not none %}
+  <div class="lab-line">Lighthouse performance score: <b>{{ lab_performance }}/100</b></div>
+  {% endif %}
+  {% endif %}
+
+  <!-- Findings -->
+  <div class="sec"><span class="n">{{ "03" if cwv else "02" }}</span> On-page findings</div>
+  {% if failed %}
+  <p class="muted" style="font-family:var(--mono);font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:var(--fail)">Failures</p>
+  {% for c in failed %}
+  <div class="checkrow"><div class="cid cid-fail">{{ c.id }}</div><div class="cmsg">{{ c.message }}</div></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if warned %}
+  <p class="muted" style="font-family:var(--mono);font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:var(--warn);margin-top:22px">Warnings</p>
+  {% for c in warned %}
+  <div class="checkrow"><div class="cid cid-warn">{{ c.id }}</div><div class="cmsg">{{ c.message }}</div></div>
+  {% endfor %}
+  {% endif %}
+
+  {% if not failed and not warned %}
+  <p>No failures or warnings — every on-page check passed.</p>
+  {% endif %}
+
+  {% if passed %}
+  <hr class="rule thin">
+  <p class="muted" style="font-family:var(--mono);font-size:11px;letter-spacing:0.16em;text-transform:uppercase;margin-bottom:10px">Passed ({{ passed | length }})</p>
+  <div class="tagcloud">{% for p in passed %}<span class="t">{{ p }}</span>{% endfor %}</div>
+  {% endif %}
+
+  {% if skipped %}
+  <p class="muted" style="font-family:var(--mono);font-size:11px;letter-spacing:0.16em;text-transform:uppercase;margin:18px 0 10px">Not assessed ({{ skipped | length }})</p>
+  <div class="tagcloud">{% for s in skipped %}<span class="t">{{ s }}</span>{% endfor %}</div>
+  {% endif %}
+
+  <footer>
+    <span>kvseo · run {{ run_id }}</span>
+    <span>Self-contained — open in any browser or print to PDF</span>
+  </footer>
+
+</main>
+</body>
+</html>
