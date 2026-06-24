@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Site Management",
 ]
 # Canonical version literal — /bump and bump-audit.sh target this field.
-version = "0.3.0"
+version = "0.4.0"
 
 # Runtime dependencies. The advisor (LiteLLM) is core IP per ADR-002; storage
 # is SQLAlchemy + Alembic per ADR-003. Bounds are deliberately loose for the
@@ -67,7 +67,7 @@ Repository = "https://github.com/kvadrum/kvseo"
 packages = ["src/kvseo"]
 
 [tool.ruff]
-line-length = 100  # roomy enough for one typed SQLAlchemy mapped_column per line
+line-length = 120  # settled width — fits a typed mapped_column or a message-bearing check return on one line
 target-version = "py312"
 src = ["src", "tests"]
 # Alembic migration scripts are generated and follow Alembic's own style.
