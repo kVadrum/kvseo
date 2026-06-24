@@ -28,7 +28,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -308,7 +308,10 @@ def latest_run(audit_id: uuid.UUID, engine: Engine) -> AdvisorRun | None:
                 AdvisorOutputORM.audit_run_id == audit_id,
                 AdvisorOutputORM.prompt_id == "prioritize",
             )
-            .order_by(AdvisorOutputORM.created_at.desc())
+            # created_at is second-resolution (datetime('now')); rowid breaks the
+            # tie so a rerun in the same second still wins over the row it replaced
+            # — otherwise `advisor show` could surface the stale earlier run.
+            .order_by(AdvisorOutputORM.created_at.desc(), text("rowid DESC"))
             .limit(1)
         ).first()
         if row is None:

@@ -17,7 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from kvseo.config.settings import Settings
-from kvseo.core.advisor.client import prioritize
+from kvseo.core.advisor.client import latest_run, prioritize
 from kvseo.core.advisor.context import AdvisorError
 from kvseo.storage.models import AdvisorOutput as AdvisorOutputORM
 
@@ -163,6 +163,38 @@ async def test_provider_exception_records_failed(
     assert run.error is not None and "503 upstream" in run.error
     row = _one_row(audit_engine)
     assert row.status == "failed"
+
+
+def test_latest_run_breaks_same_second_tie_by_insertion_order(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    # Two runs sharing a created_at second (a failed run, then an immediate
+    # successful rerun): latest_run must return the later-inserted success row,
+    # not let the tie resolve arbitrarily to the stale failure.
+    aid = seed(audit_engine)
+    same_second = "2026-06-24 12:00:00"
+    good = json.loads(_GOOD_JSON)
+    with Session(audit_engine) as s:
+        s.add(
+            AdvisorOutputORM(
+                audit_run_id=aid, prompt_id="prioritize", provider="anthropic",
+                model="m", status="invalid_output", raw_response="garbage",
+                created_at=same_second,
+            )
+        )
+        s.flush()  # force the failed row to take the lower rowid
+        s.add(
+            AdvisorOutputORM(
+                audit_run_id=aid, prompt_id="prioritize", provider="anthropic",
+                model="m", status="success", output=good, created_at=same_second,
+            )
+        )
+        s.commit()
+
+    run = latest_run(aid, audit_engine)
+    assert run is not None
+    assert run.status == "success"
+    assert run.output is not None
 
 
 async def test_missing_key_raises_before_any_call(
