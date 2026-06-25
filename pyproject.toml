@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Site Management",
 ]
 # Canonical version literal — /bump and bump-audit.sh target this field.
-version = "0.5.2"
+version = "0.5.3"
 
 # Runtime dependencies. The advisor (LiteLLM) is core IP per ADR-002; storage
 # is SQLAlchemy + Alembic per ADR-003. Bounds are deliberately loose for the
