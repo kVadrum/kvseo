@@ -30,15 +30,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
 
 from kvseo.connectors.base import ConnectorMeta
-from kvseo.connectors.gsc import GscQueryRow
-from kvseo.storage.models import GscQuery as GscQueryORM
+from kvseo.connectors.gsc import GscQueryRow, persist_gsc_rows
 
 ImportSchema = Literal["queries"]
 _SUPPORTED: tuple[str, ...] = ("queries",)
-_SQLITE_TS = "%Y-%m-%d %H:%M:%S"
 
 # Header auto-mapping for the ``queries`` schema. Keys are our canonical
 # GscQueryRow fields; values are header spellings we accept (lower-cased,
@@ -241,26 +238,7 @@ class CsvConnector:
     def _persist(self, site: str, rows: list[GscQueryRow]) -> None:
         if self._engine is None:
             return
-        # One timestamp for the whole batch, matching GscConnector._persist so a
-        # freshness read picks up the entire import, not a sub-second slice.
-        fetched_at = datetime.now(UTC).strftime(_SQLITE_TS)
-        with Session(self._engine) as session:
-            session.add_all(
-                GscQueryORM(
-                    site_origin=site,
-                    page=r.page,
-                    query=r.query,
-                    clicks=r.clicks,
-                    impressions=r.impressions,
-                    ctr=r.ctr,
-                    position=r.position,
-                    range_start=r.date_range_start.isoformat(),
-                    range_end=r.date_range_end.isoformat(),
-                    fetched_at=fetched_at,
-                )
-                for r in rows
-            )
-            session.commit()
+        persist_gsc_rows(self._engine, site, rows)  # shared GscQuery write path
 
 
 def _today() -> date:

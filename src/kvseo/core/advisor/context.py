@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import date
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -18,14 +18,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from kvseo.connectors.gsc import GscQueryRow
-from kvseo.connectors.psi import PsiOpportunity, PsiResult
+from kvseo.connectors.psi import PsiConnector, PsiResult
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
 from kvseo.storage.models import GscQuery as GscQueryORM
 from kvseo.storage.models import PsiResult as PsiResultORM
+from kvseo.storage.timestamps import parse_ts
 
 DEFAULT_MAX_GSC_QUERIES = 25
-_SQLITE_TS = "%Y-%m-%d %H:%M:%S"
 
 
 class AdvisorError(Exception):
@@ -159,18 +159,6 @@ def _recent_psi(session: Session, url: str) -> PsiResult | None:
     ).first()
     if row is None:
         return None
-    fetched = datetime.strptime(row.fetched_at, _SQLITE_TS).replace(tzinfo=UTC)
-    return PsiResult(
-        url=row.url,
-        strategy=row.strategy,
-        fetched_at=fetched,
-        field_lcp_ms=row.field_lcp_ms,
-        field_inp_ms=row.field_inp_ms,
-        field_cls=row.field_cls,
-        field_origin_fallback=row.field_origin_fallback,
-        lab_lcp_ms=row.lab_lcp_ms,
-        lab_tbt_ms=row.lab_tbt_ms,
-        lab_cls=row.lab_cls,
-        lab_performance_score=row.lab_performance_score,
-        opportunities=[PsiOpportunity(**o) for o in (row.opportunities or [])],
-    )
+    # Same ORM→PsiResult mapping the PSI connector already owns — reuse it so the
+    # 12-field shape lives in one place, not two.
+    return PsiConnector._orm_to_result(row, parse_ts(row.fetched_at))

@@ -25,7 +25,7 @@ from kvseo.core.advisor.client import AdvisorRun, prioritize
 from kvseo.core.advisor.context import AdvisorError
 from kvseo.core.audit.engine import AuditResult, run_audit
 from kvseo.core.report.renderer import render
-from kvseo.storage.db import get_engine, migrate
+from kvseo.storage.db import open_engine
 
 _REPORT_FORMATS = {"html", "md", "json", "all", "none"}
 
@@ -58,9 +58,7 @@ def audit(
         typer.secho(f"unsupported --format '{fmt}'.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    db = paths.db_path()
-    migrate(db)  # ensure the schema exists even before `kvseo init`
-    engine = get_engine(db)
+    engine = open_engine()  # migrates to head first, so the schema exists even before `kvseo init`
     psi = None if no_cwv else PsiConnector(api_key=_psi_key(), engine=engine)
     result = asyncio.run(run_audit(url, db_engine=engine, keyword=keyword, psi=psi))
 

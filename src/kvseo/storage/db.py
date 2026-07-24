@@ -17,6 +17,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
+from kvseo.config import paths
+
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
@@ -56,3 +58,14 @@ def migrate(db_path: Path) -> None:
     engine = get_engine(db_path)
     engine.connect().close()
     engine.dispose()
+
+
+def open_engine() -> Engine:
+    """Open the app database at its default path, migrated to head first.
+
+    The one call every CLI command uses to get a ready-to-query engine — it
+    folds ``db_path() → migrate() → get_engine()`` into one place.
+    """
+    db_path = paths.db_path()
+    migrate(db_path)
+    return get_engine(db_path)

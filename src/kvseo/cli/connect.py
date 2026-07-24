@@ -13,12 +13,11 @@ from typing import Annotated
 
 import typer
 
-from kvseo.config import paths
 from kvseo.config.secrets import SecretStorageError, set_secret
 from kvseo.connectors.base import ConnectorAuthError
 from kvseo.connectors.csv import CsvConnector, CsvImportError, ImportResult
 from kvseo.connectors.gsc_auth import run_oauth_flow
-from kvseo.storage.db import get_engine, migrate
+from kvseo.storage.db import open_engine
 
 app = typer.Typer(
     help="Connect kvseo to a read-only data source.", no_args_is_help=True
@@ -103,9 +102,7 @@ def csv(
         typer.secho(f"--from ({start}) is after --to ({end}).", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    db = paths.db_path()
-    migrate(db)
-    engine = get_engine(db)
+    engine = open_engine()
     connector = CsvConnector(engine=engine)
     try:
         result = asyncio.run(

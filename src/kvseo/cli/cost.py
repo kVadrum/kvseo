@@ -9,13 +9,13 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import date
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 import typer
 
-from kvseo.config import paths
+from kvseo.cli._util import fail
 from kvseo.core.cost import CostGroup, CostSummary, summarize_cost
-from kvseo.storage.db import get_engine, migrate
+from kvseo.storage.db import open_engine
 
 _GROUP_BY = {"provider", "model", "day"}
 
@@ -37,14 +37,12 @@ def cost(
 ) -> None:
     """Summarize LLM advisor cost across stored runs."""
     if by not in _GROUP_BY:
-        _fail(f"unsupported --by '{by}' (provider | model | day).", code=2)
+        fail(f"unsupported --by '{by}' (provider | model | day).", code=2)
     if since and month:
-        _fail("pass --since or --month, not both.", code=2)
+        fail("pass --since or --month, not both.", code=2)
     start, end, label = _window(since, month)
 
-    db = paths.db_path()
-    migrate(db)
-    engine = get_engine(db)
+    engine = open_engine()
     # `by` is validated against _GROUP_BY above, so it's a valid GroupBy here.
     summary = summarize_cost(engine, start=start, end=end, by=by)  # type: ignore[arg-type]
 
@@ -60,7 +58,7 @@ def _window(since: str | None, month: str | None) -> tuple[date | None, date | N
         try:
             first = date.fromisoformat(f"{month}-01")
         except ValueError:
-            _fail(f"--month expects YYYY-MM, got '{month}'.", code=2)
+            fail(f"--month expects YYYY-MM, got '{month}'.", code=2)
         # First day of the following month — no dateutil dependency.
         nxt = date(first.year + first.month // 12, first.month % 12 + 1, 1)
         return first, nxt, f"LLM cost — {month}"
@@ -68,7 +66,7 @@ def _window(since: str | None, month: str | None) -> tuple[date | None, date | N
         try:
             start = date.fromisoformat(since)
         except ValueError:
-            _fail(f"--since expects YYYY-MM-DD, got '{since}'.", code=2)
+            fail(f"--since expects YYYY-MM-DD, got '{since}'.", code=2)
         return start, None, f"LLM cost — since {since}"
     return None, None, "LLM cost — all time"
 
@@ -108,8 +106,3 @@ def _as_json(summary: CostSummary, label: str) -> str:
         },
         indent=2,
     )
-
-
-def _fail(message: str, *, code: int) -> NoReturn:
-    typer.secho(message, fg=typer.colors.RED, err=True)
-    raise typer.Exit(code=code)

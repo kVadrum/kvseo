@@ -9,7 +9,6 @@ stored result afterwards.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -25,8 +24,7 @@ from kvseo.core.audit.fetcher import FetchError, fetch
 from kvseo.core.audit.scoring import score
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
-
-_TS = "%Y-%m-%d %H:%M:%S"
+from kvseo.storage.timestamps import now_str
 
 
 class CheckOutcome(BaseModel):
@@ -129,13 +127,9 @@ def _run_check(check: CheckFn, doc: ParsedDocument, ctx: AuditContext) -> CheckR
     # A buggy check (e.g. on malformed HTML) must not abort the whole audit.
     try:
         return check(doc, ctx)
-    except Exception as exc:  # defensive: a check bug must not abort the whole audit
+    except Exception as exc:
         name = getattr(check, "__name__", "unknown")
         return CheckResult(name, "error", "info", {"error": str(exc)}, f"Check raised: {exc}")
-
-
-def _now() -> str:
-    return datetime.now(UTC).strftime(_TS)
 
 
 def _insert_running(engine: Engine, audit_id: uuid.UUID, url: str, keyword: str | None) -> None:
@@ -166,7 +160,7 @@ def _mark_failed(
                 run.page_status_code = status_code
             if duration_ms is not None:
                 run.fetch_duration_ms = duration_ms
-            run.completed_at = _now()
+            run.completed_at = now_str()
             session.commit()
 
 
@@ -189,7 +183,7 @@ def _complete(
             run.page_status_code = status_code
             run.fetch_duration_ms = duration_ms
             run.score = audit_score
-            run.completed_at = _now()
+            run.completed_at = now_str()
         session.add_all(
             AuditCheckORM(
                 audit_run_id=audit_id,

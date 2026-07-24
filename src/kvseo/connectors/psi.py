@@ -25,13 +25,12 @@ from kvseo.connectors.base import (
     ConnectorUnavailable,
 )
 from kvseo.storage.models import PsiResult as PsiResultORM
+from kvseo.storage.timestamps import parse_ts
 
 _ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 _TIMEOUT = httpx.Timeout(30.0)
 _DEFAULT_FRESHNESS = timedelta(hours=1)
 _MAX_OPPORTUNITIES = 10
-# SQLite datetime('now') format — naive UTC, no fractional seconds.
-_SQLITE_TS = "%Y-%m-%d %H:%M:%S"
 
 Strategy = Literal["mobile", "desktop"]
 
@@ -224,7 +223,7 @@ class PsiConnector:
             ).first()
         if row is None:
             return None
-        fetched = datetime.strptime(row.fetched_at, _SQLITE_TS).replace(tzinfo=UTC)
+        fetched = parse_ts(row.fetched_at)
         if datetime.now(UTC) - fetched >= freshness:
             return None
         return self._orm_to_result(row, fetched)

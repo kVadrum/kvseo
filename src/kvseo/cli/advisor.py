@@ -9,17 +9,22 @@ the most recent stored run without spending a token.
 from __future__ import annotations
 
 import asyncio
-import uuid
-from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 import typer
 
+from kvseo.cli._util import fail, parse_audit_id
 from kvseo.config import paths
 from kvseo.config.settings import Settings
-from kvseo.core.advisor.client import AdvisorRun, ContextOverflowError, latest_run, prioritize
+from kvseo.core.advisor.client import (
+    AdvisorAuthError,
+    AdvisorRun,
+    ContextOverflowError,
+    latest_run,
+    prioritize,
+)
 from kvseo.core.advisor.context import AdvisorError
-from kvseo.storage.db import get_engine, migrate
+from kvseo.storage.db import open_engine
 
 app = typer.Typer(help="Run or inspect the AI advisor.", no_args_is_help=True)
 
@@ -36,18 +41,18 @@ def run(
     json_out: Annotated[bool, typer.Option("--json", help="Emit the advisor output as JSON.")] = False,
 ) -> None:
     """Run the prioritization advisor against a stored audit."""
-    aid = _parse_id(audit_id)
+    aid = parse_audit_id(audit_id)
     settings = _settings(provider, model)
-    engine = get_engine(_db())
+    engine = open_engine()
 
     try:
         result = asyncio.run(prioritize(aid, engine=engine, settings=settings))
     except ContextOverflowError as exc:
-        _fail(str(exc), code=6)
+        fail(str(exc), code=6)
+    except AdvisorAuthError as exc:
+        fail(str(exc), code=4)  # no API key — auth error
     except AdvisorError as exc:
-        # "no API key" is an auth problem (exit 4); everything else (audit not
-        # found / not complete) is a general error (exit 1).
-        _fail(str(exc), code=4 if "no API key" in str(exc) else 1)
+        fail(str(exc), code=1)  # audit not found / not complete
 
     _emit(result, json_out=json_out)
     raise typer.Exit(_exit_for(result.status))
@@ -59,21 +64,15 @@ def show(
     json_out: Annotated[bool, typer.Option("--json", help="Emit the advisor output as JSON.")] = False,
 ) -> None:
     """Print the most recent advisor output for an audit."""
-    aid = _parse_id(audit_id)
-    engine = get_engine(_db())
+    aid = parse_audit_id(audit_id)
+    engine = open_engine()
     result = latest_run(aid, engine)
     if result is None:
-        _fail(f"no advisor run for audit {aid} — run `kvseo advisor run {aid}` first.", code=1)
+        fail(f"no advisor run for audit {aid} — run `kvseo advisor run {aid}` first.", code=1)
     _emit(result, json_out=json_out)
 
 
 # --- Shared helpers -------------------------------------------------------
-
-
-def _db() -> Path:
-    db = paths.db_path()
-    migrate(db)
-    return db
 
 
 def _settings(provider: str | None, model: str | None) -> Settings:
@@ -83,18 +82,6 @@ def _settings(provider: str | None, model: str | None) -> Settings:
     if model:
         settings.advisor.model = model
     return settings
-
-
-def _parse_id(value: str) -> uuid.UUID:
-    try:
-        return uuid.UUID(value)
-    except ValueError:
-        _fail(f"'{value}' is not a valid audit ID.", code=2)
-
-
-def _fail(message: str, *, code: int) -> NoReturn:
-    typer.secho(message, fg=typer.colors.RED, err=True)
-    raise typer.Exit(code=code)
 
 
 def _exit_for(status: str) -> int:

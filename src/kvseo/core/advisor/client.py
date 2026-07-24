@@ -66,6 +66,11 @@ class ContextOverflowError(AdvisorError):
     rather than letting the call truncate silently (05 §3)."""
 
 
+class AdvisorAuthError(AdvisorError):
+    """No API key is available for the configured provider. A typed subclass so
+    the CLI maps it to the auth exit code by type, not by sniffing the message."""
+
+
 class AdvisorRun(BaseModel):
     """The persisted outcome of one advisor call (mirrors an ``advisor_outputs``
     row). ``output`` is present only when ``status == 'success'``."""
@@ -201,7 +206,7 @@ def _ensure_provider_key(provider: str) -> None:
     if key:
         os.environ[env_var] = key
         return
-    raise AdvisorError(
+    raise AdvisorAuthError(
         f"no API key for advisor provider '{provider}'. Set ${env_var} in your "
         f"environment (or store it in your keyring as '{provider}:api_key'), then retry."
     )

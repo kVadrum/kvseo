@@ -27,12 +27,12 @@ from kvseo.connectors.base import (
     ConnectorUnavailable,
 )
 from kvseo.storage.models import GscQuery as GscQueryORM
+from kvseo.storage.timestamps import now_str, parse_ts
 
 _BASE = "https://www.googleapis.com/webmasters/v3"
 _TIMEOUT = httpx.Timeout(30.0)
 _DEFAULT_FRESHNESS = timedelta(days=1)
 _MAX_CONCURRENCY = 10  # self-imposed, leaves headroom under GSC's 30 QPS cap
-_SQLITE_TS = "%Y-%m-%d %H:%M:%S"
 
 
 class GscSite(BaseModel):
@@ -54,6 +54,38 @@ class GscQueryRow(BaseModel):
     position: float = Field(ge=0.0)  # average SERP position
     date_range_start: date
     date_range_end: date
+
+
+def persist_gsc_rows(engine: Engine, site: str, rows: list[GscQueryRow]) -> None:
+    """Batch-insert GSC query rows for ``site`` into ``gsc_queries``.
+
+    The canonical GscQuery write path — the CSV connector routes through here too,
+    so a hand-made import lands identically to a live pull. Every row in the batch
+    is stamped with one ``fetched_at`` computed once (not the per-row
+    ``datetime('now')`` default): the freshness reads select rows matching
+    ``max(fetched_at)``, so a batch straddling a 1-second boundary would otherwise
+    hand back only its last-second slice.
+    """
+    if not rows:
+        return
+    fetched_at = now_str()
+    with Session(engine) as session:
+        session.add_all(
+            GscQueryORM(
+                site_origin=site,
+                page=r.page,
+                query=r.query,
+                clicks=r.clicks,
+                impressions=r.impressions,
+                ctr=r.ctr,
+                position=r.position,
+                range_start=r.date_range_start.isoformat(),
+                range_end=r.date_range_end.isoformat(),
+                fetched_at=fetched_at,
+            )
+            for r in rows
+        )
+        session.commit()
 
 
 class GscConnector:
@@ -224,30 +256,9 @@ class GscConnector:
     # --- Persistence + freshness -----------------------------------------
 
     def _persist(self, site: str, rows: list[GscQueryRow]) -> None:
-        if self._engine is None or not rows:
+        if self._engine is None:
             return
-        # Stamp every row in the batch with one timestamp computed once, rather
-        # than the per-row ``datetime('now')`` server default: _cached_for_url
-        # reads back the rows matching max(fetched_at), so a batch that straddled
-        # a 1-second boundary would otherwise return only its last-second subset.
-        fetched_at = datetime.now(UTC).strftime(_SQLITE_TS)
-        with Session(self._engine) as session:
-            session.add_all(
-                GscQueryORM(
-                    site_origin=site,
-                    page=r.page,
-                    query=r.query,
-                    clicks=r.clicks,
-                    impressions=r.impressions,
-                    ctr=r.ctr,
-                    position=r.position,
-                    range_start=r.date_range_start.isoformat(),
-                    range_end=r.date_range_end.isoformat(),
-                    fetched_at=fetched_at,
-                )
-                for r in rows
-            )
-            session.commit()
+        persist_gsc_rows(self._engine, site, rows)
 
     def _cached_for_url(
         self, site: str, url: str, start: date, end: date, freshness: timedelta
@@ -268,7 +279,7 @@ class GscConnector:
             )
             if latest is None:
                 return None
-            fetched = datetime.strptime(latest, _SQLITE_TS).replace(tzinfo=UTC)
+            fetched = parse_ts(latest)
             if datetime.now(UTC) - fetched >= freshness:
                 return None
             rows = session.scalars(

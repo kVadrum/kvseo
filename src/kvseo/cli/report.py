@@ -11,20 +11,20 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 import typer
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from kvseo.config import paths
+from kvseo.cli._util import fail, parse_audit_id
 from kvseo.core.report.renderer import ReportError, render
-from kvseo.storage.db import get_engine, migrate
+from kvseo.storage.db import open_engine
 from kvseo.storage.models import AuditRun as AuditRunORM
 from kvseo.storage.models import Report as ReportORM
 
-_EXT = {"html": "html", "md": "md"}
+_FORMATS = {"html", "md"}
 
 
 def report(
@@ -42,18 +42,16 @@ def report(
     ] = None,
 ) -> None:
     """Render a self-contained report from stored audit data."""
-    if report_format not in _EXT:
-        _fail(f"unsupported --format '{report_format}' (v0.1: html | md).", code=2)
+    if report_format not in _FORMATS:
+        fail(f"unsupported --format '{report_format}' (v0.1: html | md).", code=2)
 
-    db = paths.db_path()
-    migrate(db)
-    engine = get_engine(db)
+    engine = open_engine()
 
     aid = _resolve_audit(engine, audit_id)
     try:
         rendered = render(aid, report_format, engine=engine)
     except ReportError as exc:
-        _fail(str(exc), code=6)
+        fail(str(exc), code=6)
 
     path = _write(rendered, output, aid, report_format)
     _record_report(engine, aid, report_format, path)
@@ -62,10 +60,7 @@ def report(
 
 def _resolve_audit(engine: Engine, audit_id: str | None) -> uuid.UUID:
     if audit_id is not None:
-        try:
-            return uuid.UUID(audit_id)
-        except ValueError:
-            _fail(f"'{audit_id}' is not a valid audit ID.", code=2)
+        return parse_audit_id(audit_id)
     # Default to the most recent completed audit.
     with Session(engine) as session:
         row = session.scalars(
@@ -75,7 +70,7 @@ def _resolve_audit(engine: Engine, audit_id: str | None) -> uuid.UUID:
             .limit(1)
         ).first()
     if row is None:
-        _fail("no completed audits to report on — run `kvseo audit <url>` first.", code=1)
+        fail("no completed audits to report on — run `kvseo audit <url>` first.", code=1)
     return row.id
 
 
@@ -84,7 +79,7 @@ def _write(rendered: str, output: Path | None, aid: uuid.UUID, fmt: str) -> Path
         path = output
     else:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-        name = f"kvseo-report-{stamp}.{_EXT[fmt]}"
+        name = f"kvseo-report-{stamp}.{fmt}"
         path = (output or Path.cwd()) / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(rendered, encoding="utf-8")
@@ -106,8 +101,3 @@ def _record_report(engine: Engine, aid: uuid.UUID, fmt: str, path: Path) -> None
             )
         )
         session.commit()
-
-
-def _fail(message: str, *, code: int) -> NoReturn:
-    typer.secho(message, fg=typer.colors.RED, err=True)
-    raise typer.Exit(code=code)

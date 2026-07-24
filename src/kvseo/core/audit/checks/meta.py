@@ -52,8 +52,7 @@ def canonical(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
 
 
 def open_graph(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
-    present = {tag: doc.meta_property(tag) is not None for tag in _OG_REQUIRED}
-    missing = [tag for tag, ok in present.items() if not ok]
+    missing = [tag for tag in _OG_REQUIRED if doc.meta_property(tag) is None]
     if not missing:
         return CheckResult("meta.og", "pass", "warn", {"present": list(_OG_REQUIRED)}, "Open Graph tags present")
     return CheckResult(
