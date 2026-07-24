@@ -27,7 +27,15 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 def _client_config(client_secrets: Path | None = None) -> dict[str, Any]:
     """Build the OAuth client config from a file, or kvseo's managed client (env)."""
     if client_secrets is not None:
-        loaded: dict[str, Any] = json.loads(client_secrets.read_text(encoding="utf-8"))
+        try:
+            loaded: dict[str, Any] = json.loads(client_secrets.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            # A typo'd path or malformed file is a config failure, not a crash —
+            # normalize to ConnectorAuthError so `connect gsc` exits 4 with a next step.
+            raise ConnectorAuthError(
+                f"couldn't read the OAuth client secrets at {client_secrets}: {exc}. "
+                "Pass a valid Google client_secrets.json via --client-secrets."
+            ) from exc
         return loaded
     client_id = os.environ.get("KVSEO_GSC_CLIENT_ID")
     client_secret = os.environ.get("KVSEO_GSC_CLIENT_SECRET")

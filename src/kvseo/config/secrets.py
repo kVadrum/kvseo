@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 
 import keyring
-from keyring.errors import KeyringError, PasswordDeleteError
+from keyring.errors import InitError, KeyringError, NoKeyringError, PasswordDeleteError
 
 _SERVICE = "kvseo"
 
@@ -35,15 +35,22 @@ def get_secret(key: str) -> str | None:
 
 
 def set_secret(key: str, value: str) -> None:
-    # Translate the backend's raw error into an actionable one — a headless / CI
-    # box with no keyring raises here, and a traceback isn't a next step.
+    # Two distinct write failures, two distinct next steps. NoKeyringError/InitError
+    # mean there's no usable backend → "install one". Any other KeyringError means a
+    # backend exists but rejected the write (locked keyring, D-Bus refusal) → surface
+    # the real cause, not the misleading "install one" advice.
     try:
         keyring.set_password(_SERVICE, key, value)
-    except KeyringError as exc:
+    except (NoKeyringError, InitError) as exc:
         raise SecretStorageError(
             "couldn't store the credential — no OS keyring backend is available "
             "on this box. Install one (e.g. `pip install keyrings.alt`, or run "
             "gnome-keyring under a session D-Bus), then re-run this command."
+        ) from exc
+    except KeyringError as exc:
+        raise SecretStorageError(
+            f"couldn't store the credential in the OS keyring ({exc}). The backend "
+            "may be locked — unlock it (or check your keyring service) and re-run."
         ) from exc
 
 

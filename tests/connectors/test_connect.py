@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import keyring
 import pytest
 from keyring.errors import NoKeyringError
@@ -52,6 +54,19 @@ def test_connect_gsc_auth_failure_exits_4(monkeypatch: pytest.MonkeyPatch) -> No
     result = runner.invoke(app, ["connect", "gsc"])
     assert result.exit_code == 4
     assert "No GSC OAuth client" in result.output
+
+
+def test_connect_gsc_bad_client_secrets_path_exits_4(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A typo'd --client-secrets path is a config failure → exit 4 with a message,
+    # not a raw FileNotFoundError traceback + generic exit 1.
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_ID", raising=False)
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_SECRET", raising=False)
+    missing = tmp_path / "nope.json"
+    result = runner.invoke(app, ["connect", "gsc", "--client-secrets", str(missing)])
+    assert result.exit_code == 4
+    assert "client secrets" in result.output.lower()
 
 
 def test_connect_psi_reports_missing_keyring_backend(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from keyring.errors import NoKeyringError
+from keyring.errors import KeyringLocked, NoKeyringError
 
 from kvseo.config import secrets
 
@@ -29,3 +29,18 @@ def test_set_secret_raises_friendly_error_without_backend(monkeypatch: pytest.Mo
     monkeypatch.setattr(secrets.keyring, "set_password", _raise)
     with pytest.raises(secrets.SecretStorageError):
         secrets.set_secret("psi:api_key", "value")
+
+
+def test_set_secret_locked_backend_reports_real_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A present-but-locked backend must NOT get the "no backend — install one"
+    # advice (which would be actively wrong); it should surface the real cause so
+    # the user unlocks the keyring instead of installing a second store.
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise KeyringLocked("the keyring is locked")
+
+    monkeypatch.setattr(secrets.keyring, "set_password", _raise)
+    with pytest.raises(secrets.SecretStorageError) as excinfo:
+        secrets.set_secret("psi:api_key", "value")
+    message = str(excinfo.value).lower()
+    assert "locked" in message
+    assert "install" not in message  # not the no-backend remedy
