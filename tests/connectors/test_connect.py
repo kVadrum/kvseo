@@ -43,6 +43,17 @@ def test_connect_psi_without_key_is_informational(
     assert get_secret("psi:api_key") is None
 
 
+def test_connect_gsc_auth_failure_exits_4(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With no OAuth client configured (no env vars, no --client-secrets), the GSC
+    # flow raises ConnectorAuthError before any browser step. That's an auth
+    # failure → exit 4 (06 §2 / §4.4), not the generic exit 1.
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_ID", raising=False)
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_SECRET", raising=False)
+    result = runner.invoke(app, ["connect", "gsc"])
+    assert result.exit_code == 4
+    assert "No GSC OAuth client" in result.output
+
+
 def test_connect_psi_reports_missing_keyring_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     # A headless box with no keyring backend must get an actionable error and a
     # non-zero exit, not an uncaught NoKeyringError traceback.

@@ -39,8 +39,9 @@ def gsc(
     try:
         refresh_token = run_oauth_flow(client_secrets=client_secrets, port=port)
     except ConnectorAuthError as exc:
+        # Auth failure is exit 4 (06 §2 / §4.4), not the generic 1.
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=4) from exc
     _store("gsc:refresh_token", refresh_token)
     typer.echo("Connected Google Search Console — refresh token stored.")
 
