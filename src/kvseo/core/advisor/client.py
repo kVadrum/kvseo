@@ -123,8 +123,12 @@ async def prioritize(
     started = time.monotonic()
     last_raw: str | None = None
     last_error: str | None = None
-    last_usage: tuple[int | None, int | None] = (None, None)
-    last_cost: float | None = None
+    # Cost/tokens ACCUMULATE across attempts: a retry spends on both calls, so the
+    # persisted row must reflect the total or `kvseo cost` under-reports. A failed
+    # second attempt still keeps the first attempt's spend.
+    total_prompt: int | None = None
+    total_completion: int | None = None
+    total_cost: float | None = None
 
     for attempt in (1, 2):
         try:
@@ -132,12 +136,16 @@ async def prioritize(
         except Exception as exc:  # provider / transport error — not retryable here
             return _record(
                 engine, audit_id, provider, model, status="failed",
-                error=f"{type(exc).__name__}: {exc}", duration_ms=_elapsed_ms(started),
+                error=f"{type(exc).__name__}: {exc}",
+                usage=(total_prompt, total_completion), cost=total_cost,
+                duration_ms=_elapsed_ms(started),
             )
 
         last_raw = _content(response)
-        last_usage = _usage(response)
-        last_cost = _cost(response)
+        prompt_tokens, completion_tokens = _usage(response)
+        total_prompt = _add(total_prompt, prompt_tokens)
+        total_completion = _add(total_completion, completion_tokens)
+        total_cost = _add(total_cost, _cost(response))
         try:
             output = PrioritizationOutput.model_validate_json(last_raw or "")
         except ValidationError as exc:
@@ -152,13 +160,14 @@ async def prioritize(
             break  # second failure — fall through to the invalid_output record
         return _record(
             engine, audit_id, provider, model, status="success", output=output,
-            raw=last_raw, usage=last_usage, cost=last_cost, duration_ms=_elapsed_ms(started),
+            raw=last_raw, usage=(total_prompt, total_completion), cost=total_cost,
+            duration_ms=_elapsed_ms(started),
         )
 
     return _record(
         engine, audit_id, provider, model, status="invalid_output",
-        raw=last_raw, error=last_error, usage=last_usage, cost=last_cost,
-        duration_ms=_elapsed_ms(started),
+        raw=last_raw, error=last_error, usage=(total_prompt, total_completion),
+        cost=total_cost, duration_ms=_elapsed_ms(started),
     )
 
 
@@ -233,6 +242,16 @@ def _usage(response: Any) -> tuple[int | None, int | None]:
     if usage is None:
         return (None, None)
     return (getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+
+
+def _add[N: (int, float)](running: N | None, new: N | None) -> N | None:
+    """Sum two optional numbers, treating None as 'no data' (not zero) — so an
+    absent value never fabricates a 0 and never discards a present running total."""
+    if new is None:
+        return running
+    if running is None:
+        return new
+    return running + new
 
 
 def _cost(response: Any) -> float | None:

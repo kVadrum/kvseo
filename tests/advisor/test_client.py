@@ -123,6 +123,39 @@ async def test_retry_recovers_from_first_bad_response(
         assert s.scalar(select(func.count()).select_from(AdvisorOutputORM)) == 1
 
 
+async def test_retry_accumulates_cost_and_tokens_across_attempts(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    # A retried call spends on BOTH attempts, so the persisted row must record the
+    # TOTAL cost/tokens — not just the successful attempt's — or `kvseo cost`
+    # under-reports. Each _Resp defaults to cost 0.0012 / usage (120, 60).
+    aid = seed(audit_engine)
+    run = await prioritize(
+        aid, engine=audit_engine, settings=_settings(),
+        completion=_completion("not json at all", _GOOD_JSON),
+    )
+    assert run.status == "success"
+    assert run.estimated_cost_usd == pytest.approx(0.0024)  # 0.0012 + 0.0012
+    assert run.prompt_tokens == 240  # 120 + 120
+    assert run.completion_tokens == 120  # 60 + 60
+
+
+async def test_failed_second_attempt_keeps_first_attempt_spend(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    # First attempt returns invalid JSON (real spend), the retry's call raises a
+    # transport error → the 'failed' row must still carry the first attempt's cost,
+    # not drop it to None.
+    aid = seed(audit_engine)
+    run = await prioritize(
+        aid, engine=audit_engine, settings=_settings(),
+        completion=_completion("not json", RuntimeError("boom")),
+    )
+    assert run.status == "failed"
+    assert run.estimated_cost_usd == pytest.approx(0.0012)
+    assert run.prompt_tokens == 120
+
+
 async def test_two_bad_responses_record_invalid_output(
     audit_engine: Engine, seed: Callable[..., uuid.UUID]
 ) -> None:
