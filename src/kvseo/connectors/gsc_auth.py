@@ -13,11 +13,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-
 from kvseo.connectors.base import ConnectorAuthError
+
+# google-auth / google-auth-oauthlib are imported lazily inside the two functions
+# that use them: they cost ~90ms to import and are only needed for `connect gsc`,
+# so keeping them out of module scope keeps every other command's startup fast.
 
 _SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
@@ -55,6 +55,8 @@ def run_oauth_flow(*, client_secrets: Path | None = None, port: int = 0) -> str:
     flow): use ``--client-secrets`` on a machine with a browser, or run the
     flow there and copy the keyring entry. Tracked as an R3 follow-up.
     """
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
     flow = InstalledAppFlow.from_client_config(_client_config(client_secrets), scopes=_SCOPES)
     creds = flow.run_local_server(port=port, prompt="consent")
     if not creds.refresh_token:
@@ -69,6 +71,9 @@ def access_token_from_refresh(
     refresh_token: str, *, client_secrets: Path | None = None
 ) -> str:
     """Exchange a stored refresh token for a fresh access token."""
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
     config = _client_config(client_secrets)
     installed = config.get("installed") or config.get("web") or {}
     creds = Credentials(  # type: ignore[no-untyped-call]  # google-auth is partially typed

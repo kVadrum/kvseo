@@ -10,14 +10,15 @@ database's ``alembic_version`` always reflects a known migration.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
 from kvseo.config import paths
+
+if TYPE_CHECKING:
+    from alembic.config import Config
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
@@ -40,6 +41,8 @@ def get_engine(db_path: Path) -> Engine:
 
 
 def _alembic_config(db_path: Path) -> Config:
+    from alembic.config import Config
+
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
@@ -53,6 +56,8 @@ def migrate(db_path: Path) -> None:
     carry our pragma listener, so we open one connection through ``get_engine``
     afterwards (WAL is a persistent, file-level mode in SQLite).
     """
+    from alembic import command  # deferred: ~100ms to import, and only migrate()
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     command.upgrade(_alembic_config(db_path), "head")
     engine = get_engine(db_path)
