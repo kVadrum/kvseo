@@ -15,6 +15,15 @@ from keyring.errors import KeyringError, PasswordDeleteError
 _SERVICE = "kvseo"
 
 
+class SecretStorageError(RuntimeError):
+    """No OS keyring backend is available to *store* a secret.
+
+    The read path (:func:`get_secret`) degrades to "no secret" on a backend-less
+    box, but a failed *write* must be reported — silently dropping a credential
+    would leave the connector broken with no signal.
+    """
+
+
 def get_secret(key: str) -> str | None:
     # A headless/CI box with no OS keyring backend raises NoKeyringError here.
     # Treat "no backend" as "no secret": callers fall back to env vars or run
@@ -26,7 +35,16 @@ def get_secret(key: str) -> str | None:
 
 
 def set_secret(key: str, value: str) -> None:
-    keyring.set_password(_SERVICE, key, value)
+    # Translate the backend's raw error into an actionable one — a headless / CI
+    # box with no keyring raises here, and a traceback isn't a next step.
+    try:
+        keyring.set_password(_SERVICE, key, value)
+    except KeyringError as exc:
+        raise SecretStorageError(
+            "couldn't store the credential — no OS keyring backend is available "
+            "on this box. Install one (e.g. `pip install keyrings.alt`, or run "
+            "gnome-keyring under a session D-Bus), then re-run this command."
+        ) from exc
 
 
 def delete_secret(key: str) -> None:

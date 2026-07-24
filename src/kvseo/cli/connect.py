@@ -14,7 +14,7 @@ from typing import Annotated
 import typer
 
 from kvseo.config import paths
-from kvseo.config.secrets import set_secret
+from kvseo.config.secrets import SecretStorageError, set_secret
 from kvseo.connectors.base import ConnectorAuthError
 from kvseo.connectors.csv import CsvConnector, CsvImportError, ImportResult
 from kvseo.connectors.gsc_auth import run_oauth_flow
@@ -42,7 +42,7 @@ def gsc(
     except ConnectorAuthError as exc:
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(code=1) from exc
-    set_secret("gsc:refresh_token", refresh_token)
+    _store("gsc:refresh_token", refresh_token)
     typer.echo("Connected Google Search Console — refresh token stored.")
 
 
@@ -55,7 +55,7 @@ def psi(
 ) -> None:
     """Connect the PageSpeed Insights API by storing your API key."""
     if api_key:
-        set_secret("psi:api_key", api_key)
+        _store("psi:api_key", api_key)
         typer.echo("Stored your PSI API key — it'll be used on your next audit.")
     else:
         typer.echo(
@@ -125,6 +125,16 @@ def csv(
 
     _print_import(result)
     raise typer.Exit(0 if result.committed else 6)
+
+
+def _store(key: str, value: str) -> None:
+    # A backend-less box can't persist the credential; surface the reason and
+    # exit on the environment-error code (3) rather than a raw traceback.
+    try:
+        set_secret(key, value)
+    except SecretStorageError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=3) from exc
 
 
 def _parse_map(pairs: list[str] | None) -> dict[str, str] | None:

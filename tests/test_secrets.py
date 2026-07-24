@@ -17,3 +17,15 @@ def test_get_secret_returns_none_without_backend(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(secrets.keyring, "get_password", _raise)
     assert secrets.get_secret("psi:api_key") is None
+
+
+def test_set_secret_raises_friendly_error_without_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The write path can't swallow the failure (that would silently drop the
+    # credential); it must raise a typed, actionable error instead of a raw
+    # NoKeyringError traceback so `kvseo connect` can report a next step.
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise NoKeyringError("no recommended backend was available")
+
+    monkeypatch.setattr(secrets.keyring, "set_password", _raise)
+    with pytest.raises(secrets.SecretStorageError):
+        secrets.set_secret("psi:api_key", "value")
