@@ -103,3 +103,22 @@ async def test_no_links_makes_no_requests() -> None:
 
     async with _client(handler) as client:
         assert await probe_links([], client=client) == {}
+
+
+@pytest.mark.parametrize("url", ["/relative/path", "not-a-url", "", "mailto:a@b.c"])
+@pytest.mark.asyncio
+async def test_unroutable_url_is_unreachable_not_an_exception(url: str) -> None:
+    """A URL httpx cannot route raises a bare ValueError ("unknown url type"),
+    which is neither an httpx.HTTPError nor an httpx.InvalidURL. Catching only
+    HTTPError let it escape probe_links and abort the whole audit — and the
+    engine calls probe_links outside the per-check guard, so there was nothing
+    downstream to soften it. Each of these must degrade to one None entry.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    async with _client(handler) as client:
+        result = await probe_links([url], client=client)
+
+    assert result == {url: None}

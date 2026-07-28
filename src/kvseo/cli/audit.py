@@ -120,7 +120,10 @@ def _audit_json(result: AuditResult, advisor_error: str | None) -> str:
     """
     payload = result.model_dump(mode="json")
     payload["advisor_error"] = advisor_error
-    return json.dumps(payload, indent=2)
+    # ensure_ascii=False to match what pydantic's model_dump_json emitted before
+    # this function existed. json.dumps defaults to True, which would turn every
+    # non-ASCII page title into \uXXXX escapes — an SEO tool reads those daily.
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def _write_reports(

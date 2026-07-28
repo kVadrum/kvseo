@@ -226,3 +226,22 @@ def test_internal_links_broken_all_healthy(good: ParsedDocument) -> None:
         fetched_url=_BASE, internal_link_status={"https://example.com/about": 200}
     )
     assert content.internal_links_broken(good, ctx).verdict == "pass"
+
+
+def test_malformed_href_does_not_raise() -> None:
+    """A href stdlib's urljoin rejects ("Invalid IPv6 URL") is skipped, not
+    propagated. It used to escape links(), which made one bad anchor able to
+    abort whatever was iterating — a single errored check when a check called
+    it, but the entire audit once the engine started calling it directly for
+    the internal-link probe."""
+    doc = ParsedDocument(
+        '<html><body>'
+        '<a href="http://[bad/y">malformed</a>'
+        '<a href="/fine">fine</a>'
+        "</body></html>",
+        _BASE,
+    )
+    links = doc.links()  # must not raise
+    assert [link.href for link in links] == ["https://example.com/fine"]
+    # And the check over it now returns a real verdict instead of "error".
+    assert content.internal_links_count(doc, _ctx()).verdict == "warn"

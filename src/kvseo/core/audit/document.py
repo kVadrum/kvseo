@@ -87,12 +87,24 @@ class ParsedDocument:
         return out
 
     def links(self) -> list[Link]:
+        """Anchors with an href, resolved to absolute.
+
+        Hrefs the URL parser rejects outright (``http://[bad/y`` raises
+        "Invalid IPv6 URL") are skipped rather than propagated. A href stdlib
+        cannot parse is not a working link, and letting the ValueError escape
+        makes one malformed anchor able to take down whatever is iterating —
+        which is every caller, checks and engine alike.
+        """
         out = []
         for node in self._tree.css("a[href]"):
             href = node.attributes.get("href") or ""
+            try:
+                resolved = urljoin(self._base, href)
+            except ValueError:
+                continue
             out.append(
                 Link(
-                    href=urljoin(self._base, href),
+                    href=resolved,
                     text=node.text(strip=True),
                     rel=(node.attributes.get("rel") or ""),
                     target=(node.attributes.get("target") or ""),

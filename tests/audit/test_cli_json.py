@@ -75,3 +75,16 @@ def test_run_advisor_reports_no_error_on_success(
 
     assert run == "advisor-run"
     assert error is None
+
+
+def test_json_preserves_non_ascii() -> None:
+    """Regression: switching from model_dump_json to json.dumps silently turned
+    every non-ASCII page title into \\uXXXX escapes. An SEO tool reads
+    international titles constantly — they must stay legible in the output."""
+    result = _result()
+    result.page_title = "Operations Consulting — KeMeK · café"
+    payload = audit_cli._audit_json(result, None)
+
+    assert "Operations Consulting — KeMeK · café" in payload
+    assert "\\u2014" not in payload
+    assert json.loads(payload)["page_title"] == result.page_title

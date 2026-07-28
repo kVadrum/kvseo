@@ -63,5 +63,10 @@ async def _probe(client: httpx.AsyncClient, semaphore: asyncio.Semaphore, url: s
             if response.status_code in (405, 501):
                 response = await client.get(url)
             return response.status_code
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+            # HTTPError alone is not enough. A URL httpx cannot route (a
+            # relative path reaching here, say) raises a bare ValueError —
+            # "unknown url type" — and httpx.InvalidURL subclasses Exception
+            # rather than HTTPError. Either escaping aborts the whole audit
+            # instead of marking one link unreachable, so all three are caught.
             return None
