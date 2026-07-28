@@ -2,6 +2,7 @@
 
 **The AI layer over your existing SEO stack.**
 
+[![PyPI](https://img.shields.io/pypi/v/kvseo.svg)](https://pypi.org/project/kvseo/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Built in public](https://img.shields.io/badge/built%20in%20public-kVadrum-e2725b.svg)](https://kvadrum.com)
@@ -15,18 +16,16 @@ The data layer is a commodity. What `kvseo` adds is the layer the others skip:
 **synthesis, AI-assisted prioritization, and agency-shaped reporting** — as a
 fast, local, single-command CLI.
 
-> **Status: v0.1 feature-complete.** The full pipeline (audit → advise → report)
-> runs end-to-end and is code-reviewed, type-checked, and tested throughout. Not
-> yet on PyPI — install from source today (see [Install](#install)); the tagged
-> release is imminent.
+> **Status: v0.1 shipped — [on PyPI](https://pypi.org/project/kvseo/).** The
+> full pipeline (audit → advise → report) runs end-to-end and is code-reviewed,
+> type-checked, and tested throughout.
 
 ---
 
 ## Quickstart
 
-Once installed (see [Install](#install)):
-
 ```console
+$ pipx install kvseo
 $ kvseo init                        # create config + a local SQLite database
 $ kvseo audit https://example.com   # on-page audit + Core Web Vitals → HTML report
 ```
@@ -46,12 +45,15 @@ $ kvseo cost                                                 # what the advisor 
 
 ## What it does
 
-- **On-page audit** — 19 checks across title, meta, headings, content, schema,
-  images, and internal links, rolled into a single 0–100 score.
+- **On-page audit** — 24 checks across title, meta, headings, content, schema,
+  images, and links, rolled into a single 0–100 score. An opt-in probe
+  (`--check-internal-links`) HEAD-checks internal links and reports the broken
+  ones.
 - **Core Web Vitals** — CrUX field data + Lighthouse lab metrics via the free
   PageSpeed Insights API (works keyless at lower rate limits).
 - **Search Console context** — real query / click / impression / position data
   per URL, via OAuth **or** a plain CSV export (the no-API escape hatch).
+  Striking-distance queries (positions 5–20) get their own report section.
 - **AI advisor** — a prioritized "what to do next" list where every
   recommendation is traceable to a specific finding. **Bring your own LLM key**
   (Anthropic, OpenAI, Gemini, or a local Ollama — anything LiteLLM speaks to).
@@ -60,6 +62,8 @@ $ kvseo cost                                                 # what the advisor 
 - **Reports** — a self-contained, single-file HTML report (inline CSS, embedded
   data, zero external requests, print-to-PDF friendly) plus clean Markdown.
   PDF/DOCX land in v0.2.
+- **Scriptable** — `kvseo audit --json` emits the full audit (score, per-check
+  findings, advisor status) as JSON for pipelines and AI agents.
 
 Everything **degrades gracefully**: the audit and HTML report work with no LLM
 key at all — the advisor is an optional layer you unlock by adding a provider
@@ -81,10 +85,9 @@ still scores the page.
 Requires **Python 3.12+**.
 
 ```console
-# from PyPI (once published):
-pipx install kvseo
+pipx install kvseo        # or: pip install kvseo
 
-# from source (works today):
+# from source, for development:
 git clone https://github.com/kVadrum/kvseo && cd kvseo
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
