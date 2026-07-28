@@ -18,6 +18,7 @@ from typing import Annotated
 import typer
 from sqlalchemy.engine import Engine
 
+from kvseo.cli._util import open_db
 from kvseo.config import paths
 from kvseo.config.secrets import get_secret
 from kvseo.config.settings import Settings
@@ -26,7 +27,6 @@ from kvseo.core.advisor.client import AdvisorRun, prioritize
 from kvseo.core.advisor.context import AdvisorError
 from kvseo.core.audit.engine import AuditResult, run_audit
 from kvseo.core.report.renderer import render
-from kvseo.storage.db import open_engine
 
 _REPORT_FORMATS = {"html", "md", "json", "all", "none"}
 
@@ -59,7 +59,7 @@ def audit(
         typer.secho(f"unsupported --format '{fmt}'.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    engine = open_engine()  # migrates to head first, so the schema exists even before `kvseo init`
+    engine = open_db()  # migrates to head first, so the schema exists even before `kvseo init`
     psi = None if no_cwv else PsiConnector(api_key=_psi_key(), engine=engine)
     result = asyncio.run(run_audit(url, db_engine=engine, keyword=keyword, psi=psi))
 

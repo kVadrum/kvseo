@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import typer
 
+from kvseo.cli._util import fail
 from kvseo.config import paths
 from kvseo.config.settings import DEFAULT_CONFIG_TOML
-from kvseo.storage.db import migrate
+from kvseo.storage.db import SchemaVersionError, migrate
 
 
 def init() -> None:
@@ -23,7 +24,10 @@ def init() -> None:
 
     db = paths.db_path()
     existed = db.exists()
-    migrate(db)  # alembic upgrade head — idempotent
+    try:
+        migrate(db)  # alembic upgrade head — idempotent
+    except SchemaVersionError as exc:
+        fail(str(exc), code=3)
     typer.echo(f"{'migrated' if existed else 'initialised'} database: {db}")
 
     typer.echo("kvseo is ready. Next: connect a data source with `kvseo connect gsc`.")

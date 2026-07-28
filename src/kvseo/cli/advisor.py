@@ -13,7 +13,7 @@ from typing import Annotated
 
 import typer
 
-from kvseo.cli._util import fail, parse_audit_id
+from kvseo.cli._util import fail, open_db, parse_audit_id
 from kvseo.config import paths
 from kvseo.config.settings import Settings
 from kvseo.core.advisor.client import (
@@ -24,7 +24,6 @@ from kvseo.core.advisor.client import (
     prioritize,
 )
 from kvseo.core.advisor.context import AdvisorError
-from kvseo.storage.db import open_engine
 
 app = typer.Typer(help="Run or inspect the AI advisor.", no_args_is_help=True)
 
@@ -43,7 +42,7 @@ def run(
     """Run the prioritization advisor against a stored audit."""
     aid = parse_audit_id(audit_id)
     settings = _settings(provider, model)
-    engine = open_engine()
+    engine = open_db()
 
     try:
         result = asyncio.run(prioritize(aid, engine=engine, settings=settings))
@@ -65,7 +64,7 @@ def show(
 ) -> None:
     """Print the most recent advisor output for an audit."""
     aid = parse_audit_id(audit_id)
-    engine = open_engine()
+    engine = open_db()
     result = latest_run(aid, engine)
     if result is None:
         fail(f"no advisor run for audit {aid} — run `kvseo advisor run {aid}` first.", code=1)

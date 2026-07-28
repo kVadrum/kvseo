@@ -13,9 +13,8 @@ from typing import Annotated
 
 import typer
 
-from kvseo.cli._util import fail
+from kvseo.cli._util import fail, open_db
 from kvseo.core.cost import CostGroup, CostSummary, summarize_cost
-from kvseo.storage.db import open_engine
 
 _GROUP_BY = {"provider", "model", "day"}
 
@@ -42,7 +41,7 @@ def cost(
         fail("pass --since or --month, not both.", code=2)
     start, end, label = _window(since, month)
 
-    engine = open_engine()
+    engine = open_db()
     # `by` is validated against _GROUP_BY above, so it's a valid GroupBy here.
     summary = summarize_cost(engine, start=start, end=end, by=by)  # type: ignore[arg-type]
 

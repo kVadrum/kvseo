@@ -18,9 +18,8 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from kvseo.cli._util import fail, parse_audit_id
+from kvseo.cli._util import fail, open_db, parse_audit_id
 from kvseo.core.report.renderer import ReportError, render
-from kvseo.storage.db import open_engine
 from kvseo.storage.models import AuditRun as AuditRunORM
 from kvseo.storage.models import Report as ReportORM
 
@@ -45,7 +44,7 @@ def report(
     if report_format not in _FORMATS:
         fail(f"unsupported --format '{report_format}' (v0.1: html | md).", code=2)
 
-    engine = open_engine()
+    engine = open_db()
 
     aid = _resolve_audit(engine, audit_id)
     try:
