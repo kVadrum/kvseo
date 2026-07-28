@@ -42,6 +42,7 @@ class SchemaBlock:
     raw: str
     types: list[str]  # @type values; empty if unparseable
     valid_json: bool
+    contexts: list[str]  # @context values; empty if absent or unparseable
 
 
 class ParsedDocument:
@@ -119,10 +120,39 @@ class ParsedDocument:
             try:
                 parsed: Any = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
-                out.append(SchemaBlock(raw=raw, types=[], valid_json=False))
+                out.append(SchemaBlock(raw=raw, types=[], valid_json=False, contexts=[]))
                 continue
-            out.append(SchemaBlock(raw=raw, types=_schema_types(parsed), valid_json=True))
+            out.append(
+                SchemaBlock(
+                    raw=raw,
+                    types=_schema_types(parsed),
+                    valid_json=True,
+                    contexts=_schema_contexts(parsed),
+                )
+            )
         return out
+
+
+def _schema_contexts(parsed: Any) -> list[str]:
+    """Pull @context values out of a parsed JSON-LD block (object or list).
+
+    @context can be a bare string, a list, or an object mapping prefixes to
+    vocabularies; only string forms are collected, which is what the
+    schema.org-vocabulary check needs to assert.
+    """
+    items = parsed if isinstance(parsed, list) else [parsed]
+    contexts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("@context")
+        if isinstance(value, str):
+            contexts.append(value)
+        elif isinstance(value, list):
+            contexts.extend(v for v in value if isinstance(v, str))
+        elif isinstance(value, dict):
+            contexts.extend(v for v in value.values() if isinstance(v, str))
+    return contexts
 
 
 def _schema_types(parsed: Any) -> list[str]:

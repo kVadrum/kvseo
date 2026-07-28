@@ -51,6 +51,13 @@ def audit(
         Path | None,
         typer.Option("--output", "-o", help="Where to write the report (default: ./)."),
     ] = None,
+    check_internal_links: Annotated[
+        bool,
+        typer.Option(
+            "--check-internal-links",
+            help="Also HEAD-check internal links (slower; up to 50 requests to the audited host).",
+        ),
+    ] = False,
     json_out: Annotated[bool, typer.Option("--json", help="Emit the full audit as JSON.")] = False,
 ) -> None:
     """Run an on-page audit against a URL."""
@@ -61,7 +68,15 @@ def audit(
 
     engine = open_db()  # migrates to head first, so the schema exists even before `kvseo init`
     psi = None if no_cwv else PsiConnector(api_key=_psi_key(), engine=engine)
-    result = asyncio.run(run_audit(url, db_engine=engine, keyword=keyword, psi=psi))
+    result = asyncio.run(
+        run_audit(
+            url,
+            db_engine=engine,
+            keyword=keyword,
+            psi=psi,
+            check_internal_links=check_internal_links,
+        )
+    )
 
     advisor: AdvisorRun | None = None
     advisor_error: str | None = None

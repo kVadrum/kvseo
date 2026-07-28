@@ -108,3 +108,121 @@ def test_cwv_checks(good: ParsedDocument) -> None:
 
     # No PSI → cwv checks skip.
     assert cwv.cwv_lcp(good, _ctx()).verdict == "skip"
+
+
+# --- Checks added alongside the v0.1 registry completion (04 §2) ------------
+
+
+def test_headings_keyword(good: ParsedDocument, poor: ParsedDocument) -> None:
+    assert headings.keyword(good, _ctx("seo audit")).verdict == "pass"
+    assert headings.keyword(good, _ctx()).verdict == "skip"  # no keyword set
+    assert headings.keyword(poor, _ctx("seo audit")).verdict == "warn"
+    # Any H1 may carry the keyword — a multi-H1 page is already flagged by
+    # headings.h1.presence and shouldn't also report a spurious keyword miss.
+    assert headings.keyword(poor, _ctx("second heading")).verdict == "pass"
+
+
+def test_headings_keyword_skips_without_h1() -> None:
+    doc = ParsedDocument("<html><body><h2>No h1 here</h2></body></html>", _BASE)
+    result = headings.keyword(doc, _ctx("anything"))
+    assert result.verdict == "skip"
+    assert result.data["reason"] == "no_h1"
+
+
+def test_images_dimensions(good: ParsedDocument, poor: ParsedDocument) -> None:
+    assert content.images_dimensions(good, _ctx()).verdict == "pass"
+    poor_result = content.images_dimensions(poor, _ctx())
+    assert poor_result.verdict == "warn"
+    assert poor_result.data["missing_dimensions"] == ["https://example.com/photo.png"]
+
+    # No images at all is a skip, not a vacuous pass.
+    empty = ParsedDocument("<html><body><p>no images</p></body></html>", _BASE)
+    assert content.images_dimensions(empty, _ctx()).verdict == "skip"
+
+
+def test_links_external_rel(good: ParsedDocument) -> None:
+    # The good fixture's external link has no target=_blank, so nothing to flag.
+    assert content.links_external_rel(good, _ctx()).verdict == "pass"
+
+    offending = ParsedDocument(
+        '<html><body>'
+        '<a href="https://evil.test/x" target="_blank">no rel</a>'
+        '<a href="https://ok.test/y" target="_blank" rel="noopener noreferrer">safe</a>'
+        '<a href="/internal" target="_blank">same host</a>'
+        "</body></html>",
+        _BASE,
+    )
+    result = content.links_external_rel(offending, _ctx())
+    assert result.verdict == "warn"
+    # Only the external, _blank, rel-less link — not the safe one, not same-host.
+    assert result.data["offenders"] == ["https://evil.test/x"]
+
+
+def test_schema_valid(good: ParsedDocument, poor: ParsedDocument) -> None:
+    assert content.schema_valid(good, _ctx()).verdict == "pass"
+    assert content.schema_valid(poor, _ctx()).verdict == "skip"  # no blocks at all
+
+
+@pytest.mark.parametrize(
+    ("block", "error"),
+    [
+        ("{not json at all", "not valid JSON"),
+        ('{"@context":"https://schema.org"}', "no @type"),
+        ('{"@type":"Article"}', "@context is not schema.org"),
+        ('{"@context":"https://example.org/vocab","@type":"Article"}', "@context is not schema.org"),
+    ],
+)
+def test_schema_valid_flags_bad_blocks(block: str, error: str) -> None:
+    doc = ParsedDocument(
+        f'<html><head><script type="application/ld+json">{block}</script></head></html>', _BASE
+    )
+    result = content.schema_valid(doc, _ctx())
+    assert result.verdict == "warn"
+    assert result.data["errors"] == [{"block": "0", "error": error}]
+
+
+def test_schema_valid_accepts_http_and_list_context() -> None:
+    """http:// schema.org and a list-form @context are both legitimate."""
+    doc = ParsedDocument(
+        '<html><head>'
+        '<script type="application/ld+json">{"@context":"http://schema.org","@type":"Organization"}</script>'
+        '<script type="application/ld+json">'
+        '{"@context":["https://schema.org","https://example.org/x"],"@type":"Person"}</script>'
+        "</head></html>",
+        _BASE,
+    )
+    assert content.schema_valid(doc, _ctx()).verdict == "pass"
+
+
+def test_internal_links_broken_skips_when_not_requested(good: ParsedDocument) -> None:
+    """Unrequested must skip, never pass — 'no broken links' for links nobody
+    probed would be a false all-clear."""
+    result = content.internal_links_broken(good, _ctx())
+    assert result.verdict == "skip"
+    assert result.data["reason"] == "not_requested"
+
+
+def test_internal_links_broken_reports_failures(good: ParsedDocument) -> None:
+    ctx = AuditContext(
+        fetched_url=_BASE,
+        internal_link_status={
+            "https://example.com/about": 200,
+            "https://example.com/gone": 404,
+            "https://example.com/dead": None,  # never completed
+            "https://example.com/moved": 301,  # redirects are not broken
+        },
+    )
+    result = content.internal_links_broken(good, ctx)
+    assert result.verdict == "warn"
+    assert result.data["checked"] == 4
+    assert result.data["broken"] == {
+        "https://example.com/gone": "404",
+        "https://example.com/dead": "unreachable",
+    }
+
+
+def test_internal_links_broken_all_healthy(good: ParsedDocument) -> None:
+    ctx = AuditContext(
+        fetched_url=_BASE, internal_link_status={"https://example.com/about": 200}
+    )
+    assert content.internal_links_broken(good, ctx).verdict == "pass"

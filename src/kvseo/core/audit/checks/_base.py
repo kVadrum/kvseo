@@ -23,6 +23,10 @@ class AuditContext:
     fetched_url: str  # post-redirect URL (for https + mixed-content checks)
     keyword: str | None = None  # user-supplied target keyword
     psi_result: PsiResult | None = None  # None → cwv.* checks skip
+    # url -> status code (None = request never completed). The engine probes
+    # these only under --check-internal-links; None here means "not requested",
+    # which is why internal_links.broken skips rather than passing on empty.
+    internal_link_status: dict[str, int | None] | None = None
 
 
 @dataclass(frozen=True)

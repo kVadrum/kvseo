@@ -56,6 +56,39 @@ def internal_links_count(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
     return CheckResult("internal_links.count", "warn", "warn", data, f"Only {count} internal link(s)")
 
 
+def internal_links_broken(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
+    """Internal links resolve to 2xx (04 §2 / §9, warn).
+
+    Pure like every other check: the engine does the probing (only under
+    ``--check-internal-links``) and passes the results in. A None context
+    field means the probe was never requested, which is a skip — reporting
+    "no broken links" for links nobody checked would be a false all-clear.
+    """
+    statuses = ctx.internal_link_status
+    if statuses is None:
+        return CheckResult(
+            "internal_links.broken", "skip", "warn", {"reason": "not_requested"},
+            "Internal-link check not run (pass --check-internal-links)",
+        )
+    if not statuses:
+        return CheckResult("internal_links.broken", "skip", "warn", {"checked": 0}, "No internal links to check")
+
+    broken = {url: code for url, code in statuses.items() if code is None or code >= 400}
+    data = {
+        "checked": len(statuses),
+        # JSON columns need string values here; None becomes "unreachable".
+        "broken": {url: (str(code) if code is not None else "unreachable") for url, code in broken.items()},
+    }
+    if not broken:
+        return CheckResult(
+            "internal_links.broken", "pass", "warn", data, f"All {len(statuses)} internal links resolve"
+        )
+    return CheckResult(
+        "internal_links.broken", "warn", "warn", data,
+        f"{len(broken)} of {len(statuses)} internal link(s) broken",
+    )
+
+
 def schema_presence(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
     blocks = doc.schema_blocks()
     types = sorted({t for block in blocks for t in block.types})
@@ -65,11 +98,92 @@ def schema_presence(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
     return CheckResult("schema.presence", "warn", "info", data, "No structured-data (JSON-LD) blocks")
 
 
+def images_dimensions(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
+    """All <img> carry width/height (04 §2, info).
+
+    Intrinsic dimensions let the browser reserve space before the image loads,
+    which is the cheapest fix for layout shift — so this is the on-page
+    counterpart to a poor ``cwv.cls``.
+    """
+    images = doc.images()
+    if not images:
+        return CheckResult("images.dimensions", "skip", "info", {"total": 0}, "No images on the page")
+    missing = [img.src for img in images if not img.width or not img.height]
+    data = {"total": len(images), "missing_dimensions": missing}
+    if not missing:
+        return CheckResult("images.dimensions", "pass", "info", data, "All images declare width and height")
+    return CheckResult(
+        "images.dimensions", "warn", "info", data, f"{len(missing)} image(s) missing width/height"
+    )
+
+
+def links_external_rel(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
+    """External target="_blank" links carry rel="noopener" (04 §2, info).
+
+    Without it the opened page gets a ``window.opener`` handle back to this
+    one — a tabnabbing vector. Modern browsers imply noopener for _blank, so
+    this is defence for older clients and an explicitness signal, hence info.
+    Only external links are considered: same-host popups hand a handle to a
+    page the author already controls.
+    """
+    host = urlparse(ctx.fetched_url).netloc
+    offenders = [
+        link.href
+        for link in doc.links()
+        if link.target.lower() == "_blank"
+        and urlparse(link.href).netloc not in ("", host)
+        and "noopener" not in link.rel.lower()
+    ]
+    data = {"offenders": offenders}
+    if not offenders:
+        return CheckResult(
+            "links.external_rel", "pass", "info", data, "External _blank links use rel=noopener"
+        )
+    return CheckResult(
+        "links.external_rel", "warn", "info", data, f"{len(offenders)} external _blank link(s) without rel=noopener"
+    )
+
+
+def schema_valid(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
+    """Structured-data blocks parse and declare a schema.org type (04 §2, warn).
+
+    Scope is deliberately structural: JSON parses, ``@type`` is present, and
+    ``@context`` points at schema.org. Validating property names against the
+    live schema.org vocabulary would mean shipping (and versioning) the
+    ontology, which v0.1 does not carry — so a block claiming a real type with
+    bogus properties passes here. That limit is worth stating rather than
+    implying a depth the check does not have.
+    """
+    blocks = doc.schema_blocks()
+    if not blocks:
+        return CheckResult("schema.valid", "skip", "warn", {"blocks": 0}, "No JSON-LD blocks to validate")
+
+    errors: list[dict[str, str]] = []
+    for index, block in enumerate(blocks):
+        if not block.valid_json:
+            errors.append({"block": str(index), "error": "not valid JSON"})
+        elif not block.types:
+            errors.append({"block": str(index), "error": "no @type"})
+        elif not any("schema.org" in c for c in block.contexts):
+            errors.append({"block": str(index), "error": "@context is not schema.org"})
+
+    data = {"blocks": len(blocks), "errors": errors}
+    if not errors:
+        return CheckResult("schema.valid", "pass", "warn", data, f"All {len(blocks)} schema block(s) valid")
+    return CheckResult(
+        "schema.valid", "warn", "warn", data, f"{len(errors)} of {len(blocks)} schema block(s) invalid"
+    )
+
+
 CHECKS: list[CheckFn] = [
     https,
     viewport,
     language,
     images_alt,
+    images_dimensions,
+    links_external_rel,
     internal_links_count,
+    internal_links_broken,
     schema_presence,
+    schema_valid,
 ]

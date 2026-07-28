@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ from kvseo.connectors.psi import PsiConnector
 from kvseo.core.audit.checks import REGISTRY, AuditContext, CheckFn, CheckResult
 from kvseo.core.audit.document import ParsedDocument
 from kvseo.core.audit.fetcher import FetchError, fetch
+from kvseo.core.audit.link_checker import probe_links
 from kvseo.core.audit.scoring import score
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
@@ -58,6 +60,8 @@ async def run_audit(
     keyword: str | None = None,
     psi: PsiConnector | None = None,
     fetch_client: httpx.AsyncClient | None = None,
+    check_internal_links: bool = False,
+    link_client: httpx.AsyncClient | None = None,
 ) -> AuditResult:
     audit_id = uuid.uuid4()
     _insert_running(db_engine, audit_id, url, keyword)
@@ -101,7 +105,21 @@ async def run_audit(
         except ConnectorError:
             psi_result = None  # cwv.* checks skip; the score covers the rest
 
-    ctx = AuditContext(fetched_url=fetched.final_url, keyword=keyword, psi_result=psi_result)
+    # Off by default (04 §9): up to 50 HEAD requests against the audited host
+    # is the slowest non-PSI stage and the most likely thing to make a first
+    # audit feel broken. None (not {}) when unrequested, so the check skips.
+    link_status = None
+    if check_internal_links:
+        host = urlparse(fetched.final_url).netloc
+        internal = [link.href for link in doc.links() if urlparse(link.href).netloc == host]
+        link_status = await probe_links(internal, client=link_client)
+
+    ctx = AuditContext(
+        fetched_url=fetched.final_url,
+        keyword=keyword,
+        psi_result=psi_result,
+        internal_link_status=link_status,
+    )
     results = [_run_check(check, doc, ctx) for check in REGISTRY]
     audit_score = score(results)
     title = doc.title()
