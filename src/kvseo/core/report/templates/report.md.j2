@@ -68,6 +68,22 @@ Lighthouse performance score: **{{ lab_performance }}/100**
 {% endif %}
 {% endif %}
 
+{% if gsc %}
+## Search Console
+
+{% if gsc_range %}_Queries for this page, {{ gsc_range }}. Top {{ gsc | length }} by impressions._
+{% endif %}
+{% if gsc_striking %}
+**{{ gsc_striking }} striking-distance {{ "opportunity" if gsc_striking == 1 else "opportunities" }}** (marked ◆) — queries with real demand ranking just off the top of page 1, where a small gain moves the most clicks.
+{% endif %}
+
+| Query | Clicks | Impressions | CTR | Position |
+|---|---:|---:|---:|---:|
+{% for q in gsc %}
+| {{ "◆ " if q.striking else "" }}{{ q.query }} | {{ q.clicks }} | {{ q.impressions }} | {{ q.ctr }} | {{ q.position }} |
+{% endfor %}
+{% endif %}
+
 ## On-page findings
 
 {% if failed %}

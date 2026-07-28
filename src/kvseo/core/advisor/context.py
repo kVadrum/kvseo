@@ -10,18 +10,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import date
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from kvseo.connectors.gsc import GscQueryRow
+from kvseo.connectors.gsc import GscQueryRow, recent_queries
 from kvseo.connectors.psi import PsiConnector, PsiResult
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
-from kvseo.storage.models import GscQuery as GscQueryORM
 from kvseo.storage.models import PsiResult as PsiResultORM
 from kvseo.storage.timestamps import parse_ts
 
@@ -84,7 +82,7 @@ def build_context(
             select(AuditCheckORM).where(AuditCheckORM.audit_run_id == audit_id)
         ).all()
         audit = _summarize(run, checks)
-        gsc = _recent_gsc(session, run.fetched_url, max_gsc_queries) if run.fetched_url else []
+        gsc = recent_queries(session, run.fetched_url, limit=max_gsc_queries) if run.fetched_url else []
         psi = _recent_psi(session, run.fetched_url) if run.fetched_url else None
 
     return Context(audit=audit, gsc_queries=gsc, psi=psi, target_keyword=run.keyword)
@@ -117,37 +115,6 @@ def _check(c: AuditCheckORM) -> CheckSummary:
     return CheckSummary(
         id=c.check_id, severity=c.severity, message=c.message or "", data=dict(c.data or {})
     )
-
-
-def _recent_gsc(session: Session, page: str, limit: int) -> list[GscQueryRow]:
-    """The most recent GSC batch for this page, top ``limit`` by impressions.
-
-    GSC rows accumulate over time; we want one coherent snapshot, so we pin to
-    the latest ``fetched_at`` for the page rather than mixing batches."""
-    latest = session.scalar(
-        select(func.max(GscQueryORM.fetched_at)).where(GscQueryORM.page == page)
-    )
-    if latest is None:
-        return []
-    rows = session.scalars(
-        select(GscQueryORM)
-        .where(GscQueryORM.page == page, GscQueryORM.fetched_at == latest)
-        .order_by(GscQueryORM.impressions.desc())
-        .limit(limit)
-    ).all()
-    return [
-        GscQueryRow(
-            query=r.query,
-            page=r.page,
-            clicks=r.clicks,
-            impressions=r.impressions,
-            ctr=r.ctr,
-            position=r.position,
-            date_range_start=date.fromisoformat(r.range_start),
-            date_range_end=date.fromisoformat(r.range_end),
-        )
-        for r in rows
-    ]
 
 
 def _recent_psi(session: Session, url: str) -> PsiResult | None:

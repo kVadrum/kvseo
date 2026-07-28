@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from datetime import date
 
 import pytest
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from kvseo.connectors.gsc import GscQueryRow
 from kvseo.core.advisor.schemas import PrioritizationOutput, PriorityAction
-from kvseo.core.report.renderer import ReportError, render
+from kvseo.core.report.renderer import ReportError, _gsc, _load, render
 from kvseo.storage.models import AdvisorOutput as AdvisorOutputORM
 
 
@@ -90,6 +92,94 @@ def test_markdown_renders(audit_engine: Engine, seed: Callable[..., uuid.UUID]) 
     assert "Core Web Vitals" in md
     # Markdown must not carry HTML tags from the template.
     assert "<div" not in md
+
+
+def test_gsc_section_marks_striking_distance(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    """The seeded batch has three queries; two sit in striking distance
+    (positions 14.2 and 8.7 with enough impressions) and the position-1.2 brand
+    query does not — it already ranks, so it is not an opportunity."""
+    aid = seed(audit_engine)
+    data = _load(aid, audit_engine)
+
+    assert [q["query"] for q in data["gsc"] if q["striking"]] == [
+        "ops consulting west virginia",
+        "ops consulting",
+    ]
+    assert data["gsc_striking"] == 2
+    assert data["gsc_range"] == "2026-05-01 to 2026-05-31"
+    # Ordered by impressions, and display-formatted (fraction CTR -> percent).
+    assert [q["impressions"] for q in data["gsc"]] == [412, 188, 96]
+    assert data["gsc"][0]["ctr"] == "1.9%"
+    assert data["gsc"][0]["position"] == "14.2"
+
+
+@pytest.mark.parametrize(
+    ("position", "impressions", "expected"),
+    [
+        (5.0, 50, True),  # lower bound inclusive
+        (20.0, 50, True),  # upper bound inclusive
+        (4.9, 50, False),  # already top-5, not an opportunity
+        (20.1, 50, False),  # too far back for a small gain to pay
+        (12.0, 10, True),  # impressions floor inclusive
+        (12.0, 9, False),  # below the floor: long-tail noise
+    ],
+)
+def test_striking_distance_boundaries(
+    position: float, impressions: int, expected: bool
+) -> None:
+    row = GscQueryRow(
+        query="q",
+        page="https://kemek.net/services",
+        clicks=1,
+        impressions=impressions,
+        ctr=0.02,
+        position=position,
+        date_range_start=date(2026, 5, 1),
+        date_range_end=date(2026, 5, 31),
+    )
+    assert _gsc([row])[0]["striking"] is expected
+
+
+def test_gsc_absent_when_no_queries_stored(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    aid = seed(audit_engine, with_gsc=False)
+    data = _load(aid, audit_engine)
+    assert data["gsc"] == [] and data["gsc_striking"] == 0
+    assert data["gsc_range"] is None
+    # The whole section drops out rather than rendering an empty table, and the
+    # section counter closes the gap: findings takes 03, not 04.
+    # Match the rendered header/table, not the bare words — the stylesheet
+    # comment mentions "Search Console" whether or not the section renders.
+    html = render(aid, "html", engine=audit_engine)
+    assert "</span> Search Console</div>" not in html
+    assert '<table class="gsc">' not in html
+    assert ">03</span> On-page findings" in html
+    assert "## Search Console" not in render(aid, "md", engine=audit_engine)
+
+
+def test_gsc_renders_in_both_formats(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    aid = seed(audit_engine)
+    html = render(aid, "html", engine=audit_engine)
+    md = render(aid, "md", engine=audit_engine)
+
+    assert ">03</span> Search Console" in html
+    assert ">04</span> On-page findings" in html
+    assert "2 striking-distance opportunities" in html
+    assert "ops consulting west virginia" in html and "21.8%" in html
+    # The striking rows carry the accent class; the brand query does not.
+    assert html.count('<tr class="hit">') == 2
+    # Autoescape must not mangle the attribute or the marker glyph.
+    assert "&#34;" not in html and "&amp;#9670;" not in html
+
+    assert "## Search Console" in md
+    assert "| ◆ ops consulting west virginia | 8 | 412 | 1.9% | 14.2 |" in md
+    assert "| kemek network | 41 | 188 | 21.8% | 1.2 |" in md
+    assert "<div" not in md and "<tr" not in md
 
 
 def test_unsupported_format_raises(audit_engine: Engine, seed: Callable[..., uuid.UUID]) -> None:

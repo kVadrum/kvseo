@@ -88,6 +88,39 @@ def persist_gsc_rows(engine: Engine, site: str, rows: list[GscQueryRow]) -> None
         session.commit()
 
 
+def _orm_to_row(r: GscQueryORM) -> GscQueryRow:
+    """Map a stored ``gsc_queries`` row back to the connector's ``GscQueryRow``."""
+    return GscQueryRow(
+        query=r.query,
+        page=r.page,
+        clicks=r.clicks,
+        impressions=r.impressions,
+        ctr=r.ctr,
+        position=r.position,
+        date_range_start=date.fromisoformat(r.range_start),
+        date_range_end=date.fromisoformat(r.range_end),
+    )
+
+
+def recent_queries(session: Session, page: str, *, limit: int) -> list[GscQueryRow]:
+    """The most recent stored GSC batch for ``page``, top ``limit`` by impressions.
+
+    GSC rows accumulate over time, so we pin to the latest ``fetched_at`` for the
+    page rather than mixing batches — one coherent snapshot. Shared by the advisor
+    context and the report renderer so the read + mapping live in one place.
+    """
+    latest = session.scalar(select(func.max(GscQueryORM.fetched_at)).where(GscQueryORM.page == page))
+    if latest is None:
+        return []
+    rows = session.scalars(
+        select(GscQueryORM)
+        .where(GscQueryORM.page == page, GscQueryORM.fetched_at == latest)
+        .order_by(GscQueryORM.impressions.desc())
+        .limit(limit)
+    ).all()
+    return [_orm_to_row(r) for r in rows]
+
+
 class GscConnector:
     """Read-only Google Search Console connector.
 
@@ -291,16 +324,4 @@ class GscConnector:
                     GscQueryORM.fetched_at == latest,
                 )
             ).all()
-        return [
-            GscQueryRow(
-                query=r.query,
-                page=r.page,
-                clicks=r.clicks,
-                impressions=r.impressions,
-                ctr=r.ctr,
-                position=r.position,
-                date_range_start=date.fromisoformat(r.range_start),
-                date_range_end=date.fromisoformat(r.range_end),
-            )
-            for r in rows
-        ]
+        return [_orm_to_row(r) for r in rows]

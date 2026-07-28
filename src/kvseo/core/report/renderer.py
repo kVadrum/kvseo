@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from kvseo.connectors.gsc import GscQueryRow, recent_queries
 from kvseo.core.advisor.client import latest_run
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
@@ -36,6 +37,17 @@ _CWV_BANDS: dict[str, tuple[float, float]] = {
     "inp": (200, 500),  # ms
     "cls": (0.1, 0.25),  # unitless
 }
+
+# Search Console: how many queries the report shows, and what counts as a
+# "striking distance" opportunity -- a query with real demand sitting at
+# page-1-bottom / page-2 (positions 5-20), where a small rank gain unlocks
+# outsized clicks. This is the single most actionable slice of GSC data.
+#
+# The impressions floor keeps long-tail noise out: a query at position 12 with
+# 3 impressions is a rounding error, not an opportunity worth an action item.
+_GSC_LIMIT = 15
+_STRIKING_POS = (5.0, 20.0)
+_STRIKING_MIN_IMPRESSIONS = 10
 
 
 class ReportError(Exception):
@@ -83,7 +95,11 @@ def _load(audit_id: uuid.UUID, engine: Engine) -> dict[str, Any]:
             if run.fetched_url
             else None
         )
+        gsc_rows = (
+            recent_queries(session, run.fetched_url, limit=_GSC_LIMIT) if run.fetched_url else []
+        )
     advisor = latest_run(audit_id, engine)
+    gsc = _gsc(gsc_rows)
 
     failed = [_check(c) for c in checks if c.verdict == "fail"]
     warned = [_check(c) for c in checks if c.verdict == "warn"]
@@ -116,6 +132,9 @@ def _load(audit_id: uuid.UUID, engine: Engine) -> dict[str, Any]:
         "advisor_cost": advisor.estimated_cost_usd if advisor else None,
         "cwv": _cwv(psi),
         "lab_performance": psi.lab_performance_score if psi else None,
+        "gsc": gsc,
+        "gsc_striking": sum(1 for q in gsc if q["striking"]),
+        "gsc_range": _gsc_range(gsc_rows),
     }
 
 
@@ -138,6 +157,38 @@ def _score_band(score: int | None) -> str:
     if score >= 50:
         return "fair"
     return "poor"
+
+
+def _gsc(rows: list[GscQueryRow]) -> list[dict[str, Any]]:
+    """Search Console rows shaped for display, newest batch, highest impressions
+    first. ``striking`` marks the actionable slice (see the constants above);
+    the templates lean on it for both the row emphasis and the summary count."""
+    low, high = _STRIKING_POS
+    return [
+        {
+            "query": r.query,
+            "clicks": r.clicks,
+            "impressions": r.impressions,
+            "ctr": f"{r.ctr * 100:.1f}%",
+            "position": f"{r.position:.1f}",
+            "striking": (
+                low <= r.position <= high and r.impressions >= _STRIKING_MIN_IMPRESSIONS
+            ),
+        }
+        for r in rows
+    ]
+
+
+def _gsc_range(rows: list[GscQueryRow]) -> str | None:
+    """The date window the displayed GSC rows cover, for the section subhead.
+
+    Rows come from a single ``fetched_at`` batch but each carries its own
+    range, so span the outer bounds rather than trusting the first row."""
+    if not rows:
+        return None
+    start = min(r.date_range_start for r in rows)
+    end = max(r.date_range_end for r in rows)
+    return f"{start.isoformat()} to {end.isoformat()}"
 
 
 def _cwv(psi: PsiResultORM | None) -> list[dict[str, Any]]:

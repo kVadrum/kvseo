@@ -137,6 +137,26 @@
   .lab-line { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:14px; }
   .lab-line b { color:var(--ink); }
 
+  /* Search Console — data table. Numerics are mono + right-aligned so columns
+     scan vertically; "striking distance" rows carry the one accent so the
+     actionable slice is findable without reading every position. */
+  .gsc-note { font-family:var(--mono); font-size:11px; color:var(--muted); margin:0 0 14px; }
+  .gsc-lead { font-size:14px; margin:0 0 16px; }
+  .gsc-lead b { color:var(--accent); }
+  .gsc-wrap { overflow-x:auto; }
+  table.gsc { width:100%; border-collapse:collapse; font-size:13px; }
+  table.gsc th {
+    font-family:var(--mono); font-size:10px; letter-spacing:0.16em; text-transform:uppercase;
+    color:var(--muted); font-weight:500; text-align:left; padding:0 10px 8px 0;
+    border-bottom:1px solid var(--rule-bold); white-space:nowrap;
+  }
+  table.gsc td { padding:9px 10px 9px 0; border-bottom:1px solid var(--rule); vertical-align:top; }
+  table.gsc th.num, table.gsc td.num { text-align:right; font-family:var(--mono); white-space:nowrap; }
+  table.gsc td.q { word-break:break-word; }
+  table.gsc tr.hit td { background:var(--accent-soft); }
+  table.gsc tr.hit td.q { font-weight:600; }
+  .gsc-mark { color:var(--accent); font-family:var(--mono); margin-right:6px; }
+
   /* Check lists */
   .checkrow { display:grid; grid-template-columns: 200px 1fr; gap:16px; padding:10px 0; border-top:1px solid var(--rule); align-items:baseline; }
   .checkrow:first-of-type { border-top:0; }
@@ -203,7 +223,12 @@
   </div>
 
   <!-- Prioritized actions (advisor) -->
-  <div class="sec"><span class="n">01</span> Prioritized actions</div>
+  {# Sections are numbered by a running counter rather than literals: Core Web
+     Vitals and Search Console are both conditional, so any fixed numbering has
+     to encode every combination. Bump `sec.n` immediately before each header. #}
+  {% set sec = namespace(n=0) %}
+  {% set sec.n = sec.n + 1 %}
+  <div class="sec"><span class="n">{{ "%02d" % sec.n }}</span> Prioritized actions</div>
   {% if advisor %}
     {% if advisor.summary %}
     <div class="summary">
@@ -246,7 +271,8 @@
 
   <!-- Core Web Vitals -->
   {% if cwv %}
-  <div class="sec"><span class="n">02</span> Core Web Vitals</div>
+  {% set sec.n = sec.n + 1 %}
+  <div class="sec"><span class="n">{{ "%02d" % sec.n }}</span> Core Web Vitals</div>
   <div class="vitals">
     {% for m in cwv %}
     <div class="vital rate-{{ m.rating }}">
@@ -265,7 +291,47 @@
   {% endif %}
 
   <!-- Findings -->
-  <div class="sec"><span class="n">{{ "03" if cwv else "02" }}</span> On-page findings</div>
+  {% if gsc %}
+  {% set sec.n = sec.n + 1 %}
+  <div class="sec"><span class="n">{{ "%02d" % sec.n }}</span> Search Console</div>
+  {% if gsc_range %}
+  <p class="gsc-note">Queries for this page, {{ gsc_range }} · top {{ gsc | length }} by impressions</p>
+  {% endif %}
+  {% if gsc_striking %}
+  <p class="gsc-lead">
+    <b>{{ gsc_striking }} striking-distance {{ "opportunity" if gsc_striking == 1 else "opportunities" }}</b>
+    — queries with real demand ranking just off the top of page 1, where a small gain moves the most clicks.
+  </p>
+  {% endif %}
+  <div class="gsc-wrap">
+    <table class="gsc">
+      <thead>
+        <tr>
+          <th>Query</th>
+          <th class="num">Clicks</th>
+          <th class="num">Impressions</th>
+          <th class="num">CTR</th>
+          <th class="num">Position</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for q in gsc %}
+        <tr class="{{ 'hit' if q.striking else '' }}">
+          <td class="q">{% if q.striking %}<span class="gsc-mark" aria-hidden="true">&#9670;</span>{% endif %}{{ q.query }}</td>
+          <td class="num">{{ q.clicks }}</td>
+          <td class="num">{{ q.impressions }}</td>
+          <td class="num">{{ q.ctr }}</td>
+          <td class="num">{{ q.position }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <hr class="rule">
+  {% endif %}
+
+  {% set sec.n = sec.n + 1 %}
+  <div class="sec"><span class="n">{{ "%02d" % sec.n }}</span> On-page findings</div>
   {% if failed %}
   <p class="muted" style="font-family:var(--mono);font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:var(--fail)">Failures</p>
   {% for c in failed %}
