@@ -152,11 +152,8 @@ def _schema_contexts(parsed: Any) -> list[str]:
     vocabularies; only string forms are collected, which is what the
     schema.org-vocabulary check needs to assert.
     """
-    items = parsed if isinstance(parsed, list) else [parsed]
     contexts: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+    for item in _schema_nodes(parsed):
         value = item.get("@context")
         if isinstance(value, str):
             contexts.append(value)
@@ -168,14 +165,35 @@ def _schema_contexts(parsed: Any) -> list[str]:
 
 
 def _schema_types(parsed: Any) -> list[str]:
-    """Pull @type values out of a parsed JSON-LD block (object or list)."""
-    items = parsed if isinstance(parsed, list) else [parsed]
+    """Pull @type values out of a parsed JSON-LD block (object or list).
+
+    Descends into ``@graph``. That wrapper is not an edge case — it is what
+    Yoast, RankMath and most WordPress SEO plugins emit, so a reader that only
+    looks at the top level sees no ``@type`` on a large share of real pages and
+    reports valid structured data as broken.
+    """
     types: list[str] = []
-    for item in items:
-        if isinstance(item, dict):
-            value = item.get("@type")
-            if isinstance(value, str):
-                types.append(value)
-            elif isinstance(value, list):
-                types.extend(str(v) for v in value)
+    for item in _schema_nodes(parsed):
+        value = item.get("@type")
+        if isinstance(value, str):
+            types.append(value)
+        elif isinstance(value, list):
+            types.extend(str(v) for v in value)
     return types
+
+
+def _schema_nodes(parsed: Any) -> list[dict[str, Any]]:
+    """Every JSON-LD node in a block: top-level objects plus any ``@graph``
+    members, one level of nesting deep (which is the shape in the wild)."""
+    items = parsed if isinstance(parsed, list) else [parsed]
+    nodes: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        nodes.append(item)
+        graph = item.get("@graph")
+        if isinstance(graph, list):
+            nodes.extend(node for node in graph if isinstance(node, dict))
+        elif isinstance(graph, dict):
+            nodes.append(graph)
+    return nodes

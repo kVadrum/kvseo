@@ -245,3 +245,30 @@ def test_malformed_href_does_not_raise() -> None:
     assert [link.href for link in links] == ["https://example.com/fine"]
     # And the check over it now returns a real verdict instead of "error".
     assert content.internal_links_count(doc, _ctx()).verdict == "warn"
+
+
+@pytest.mark.parametrize(
+    ("block", "expected_types"),
+    [
+        # Codex /cr finding: the @graph wrapper is what Yoast / RankMath and most
+        # WordPress SEO plugins emit. Reading only the top level saw no @type and
+        # reported valid structured data as broken.
+        (
+            '{"@context":"https://schema.org","@graph":'
+            '[{"@type":"Organization"},{"@type":"WebSite"}]}',
+            ["Organization", "WebSite"],
+        ),
+        # A single-object @graph, and @type lists, both occur in the wild.
+        ('{"@context":"https://schema.org","@graph":{"@type":"Person"}}', ["Person"]),
+        (
+            '{"@context":"https://schema.org","@type":["Article","BlogPosting"]}',
+            ["Article", "BlogPosting"],
+        ),
+    ],
+)
+def test_schema_graph_shapes_are_understood(block: str, expected_types: list[str]) -> None:
+    doc = ParsedDocument(
+        f'<html><head><script type="application/ld+json">{block}</script></head></html>', _BASE
+    )
+    assert doc.schema_blocks()[0].types == expected_types
+    assert content.schema_valid(doc, _ctx()).verdict == "pass"
