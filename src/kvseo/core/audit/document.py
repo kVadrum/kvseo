@@ -47,7 +47,12 @@ class SchemaBlock:
 
 class ParsedDocument:
     """Immutable after construction; the list accessors parse once and cache —
-    the checks and the engine may each call them several times per audit."""
+    the checks and the engine may each call them several times per audit.
+
+    The accessors return the cached lists themselves, not copies: treat them
+    as frozen. Mutating one (sort/pop/append) corrupts every later read of
+    the same document within the audit.
+    """
 
     def __init__(self, html: str, base_url: str) -> None:
         self._tree = HTMLParser(html)
