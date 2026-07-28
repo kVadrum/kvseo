@@ -9,6 +9,7 @@ rather than a failure.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from pathlib import Path
@@ -63,41 +64,59 @@ def audit(
     result = asyncio.run(run_audit(url, db_engine=engine, keyword=keyword, psi=psi))
 
     advisor: AdvisorRun | None = None
+    advisor_error: str | None = None
     if result.status == "complete" and not no_advisor:
-        advisor = _run_advisor(result.id, engine, quiet=json_out)
+        advisor, advisor_error = _run_advisor(result.id, engine)
 
     written: list[Path] = []
     if result.status == "complete" and fmt != "none":
-        written = _write_reports(result, fmt, output, engine)
+        written = _write_reports(result, fmt, output, engine, advisor_error)
 
     if json_out:
-        typer.echo(result.model_dump_json(indent=2))
+        typer.echo(_audit_json(result, advisor_error))
     else:
         _print_summary(result, advisor, written)
     raise typer.Exit(0 if result.status == "complete" else 1)
 
 
-def _run_advisor(audit_id: uuid.UUID, engine: Engine, quiet: bool) -> AdvisorRun | None:
+def _run_advisor(audit_id: uuid.UUID, engine: Engine) -> tuple[AdvisorRun | None, str | None]:
+    """Run the advisor, returning ``(run, error_message)``.
+
+    A failure here is not fatal — no key / oversized context / not-ready all
+    leave the deterministic audit standing. But it must stay *visible*: the
+    message goes to stderr for humans and is returned so ``--json`` can carry
+    it as a field. Writing to stderr is safe under ``--json`` because the
+    document itself goes to stdout.
+    """
     settings = Settings.load(paths.config_file())
     try:
-        return asyncio.run(prioritize(audit_id, engine=engine, settings=settings))
+        return asyncio.run(prioritize(audit_id, engine=engine, settings=settings)), None
     except AdvisorError as exc:
-        # No key / oversized context / not-ready: the audit still stands. Surface
-        # the reason once, then carry on — the advisor can be re-run later.
-        if not quiet:
-            typer.secho(f"advisor skipped — {exc}", fg=typer.colors.YELLOW, err=True)
-        return None
+        typer.secho(f"advisor skipped — {exc}", fg=typer.colors.YELLOW, err=True)
+        return None, str(exc)
+
+
+def _audit_json(result: AuditResult, advisor_error: str | None) -> str:
+    """The audit as JSON, plus an ``advisor_error`` field.
+
+    The key is always present — null on success — so a consumer can test it
+    without a key-existence check, and an advisor failure can never be
+    indistinguishable from a run where the advisor was never attempted.
+    """
+    payload = result.model_dump(mode="json")
+    payload["advisor_error"] = advisor_error
+    return json.dumps(payload, indent=2)
 
 
 def _write_reports(
-    result: AuditResult, fmt: str, output: Path | None, engine: Engine
+    result: AuditResult, fmt: str, output: Path | None, engine: Engine, advisor_error: str | None
 ) -> list[Path]:
     targets = ["html", "md"] if fmt == "all" else [fmt]
     multi = len(targets) > 1
     written: list[Path] = []
     for target in targets:
         content = (
-            result.model_dump_json(indent=2)
+            _audit_json(result, advisor_error)
             if target == "json"
             else render(result.id, target, engine=engine)
         )
