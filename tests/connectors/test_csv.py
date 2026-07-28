@@ -70,6 +70,23 @@ async def test_bom_and_default_page(tmp_path: Path) -> None:
     assert pages == {"https://kemek.net/"}
 
 
+async def test_gsc_ui_export_header_automaps(tmp_path: Path) -> None:
+    # The literal header of the GSC UI's Search-results export ("Top queries")
+    # must auto-map — it is the exact file the no-API path exists for. Caught
+    # missing in the v0.9.5 pre-tag wheel test; do not let it regress.
+    engine = _engine(tmp_path)
+    conn = CsvConnector(engine=engine)
+    result = await conn.import_csv(FIXTURES / "queries_gsc_ui.csv", site=SITE, default_page=SITE)
+    assert result.committed is True
+    assert (result.total_rows, result.imported, result.failed) == (2, 2, 0)
+    with Session(engine) as s:
+        top = s.scalars(select(GscQueryORM).order_by(GscQueryORM.impressions.desc())).first()
+    assert top is not None
+    assert top.query == "best local fixtures"
+    assert top.ctr == pytest.approx(0.08)
+    assert top.position == pytest.approx(8.2)
+
+
 async def test_partial_failure_commits_valid_rows(tmp_path: Path) -> None:
     # One of four rows has an empty query → 25% fail, under the 50% threshold,
     # so the three valid rows commit and the failure is reported.

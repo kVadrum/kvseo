@@ -42,7 +42,9 @@ _SUPPORTED: tuple[str, ...] = ("queries",)
 # stripped) from common exports — Google Search Console's UI export, the
 # Search Analytics API, and a few third-party tools.
 _QUERY_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
-    "query": ("query", "queries", "search query", "keyword", "keywords", "term"),
+    # "top queries" is the literal header of the GSC UI's Search-results export
+    # — the exact file the no-API path exists for.
+    "query": ("query", "queries", "top queries", "search query", "keyword", "keywords", "term"),
     "page": ("page", "pages", "landing page", "url", "address", "top pages"),
     "clicks": ("clicks", "url clicks", "click"),
     "impressions": ("impressions", "impr", "impr.", "impression"),
