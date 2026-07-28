@@ -5,7 +5,7 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 from kvseo.core.audit.checks._base import AuditContext, CheckFn, CheckResult
-from kvseo.core.audit.document import ParsedDocument
+from kvseo.core.audit.document import ParsedDocument, is_external, is_internal
 
 _MIN_INTERNAL_LINKS = 3
 
@@ -48,7 +48,7 @@ def images_alt(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
 
 def internal_links_count(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
     host = urlparse(ctx.fetched_url).netloc
-    internal = [link for link in doc.links() if urlparse(link.href).netloc == host]
+    internal = [link for link in doc.links() if is_internal(link.href, host)]
     count = len(internal)
     data = {"count": count, "min": _MIN_INTERNAL_LINKS}
     if count >= _MIN_INTERNAL_LINKS:
@@ -131,7 +131,7 @@ def links_external_rel(doc: ParsedDocument, ctx: AuditContext) -> CheckResult:
         link.href
         for link in doc.links()
         if link.target.lower() == "_blank"
-        and urlparse(link.href).netloc not in ("", host)
+        and is_external(link.href, host)
         and "noopener" not in link.rel.lower()
     ]
     data = {"offenders": offenders}

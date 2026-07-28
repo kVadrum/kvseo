@@ -16,12 +16,11 @@ import asyncio
 
 import httpx
 
-from kvseo import __version__
+from kvseo.core.audit.fetcher import USER_AGENT
 
 MAX_LINKS = 50  # audit.internal_link_max
 _CONCURRENCY = 8
 _TIMEOUT = httpx.Timeout(5.0, connect=5.0)
-_USER_AGENT = f"kvseo/{__version__} (+https://github.com/kvadrum/kvseo)"
 
 # Status of a probed link: an HTTP status code, or None when the request never
 # produced one (DNS failure, connection refused, timeout).
@@ -42,7 +41,7 @@ async def probe_links(urls: list[str], *, client: httpx.AsyncClient | None = Non
     active = client or httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=True,
-        headers={"User-Agent": _USER_AGENT},
+        headers={"User-Agent": USER_AGENT},
     )
     semaphore = asyncio.Semaphore(_CONCURRENCY)
     try:

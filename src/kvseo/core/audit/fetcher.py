@@ -24,7 +24,7 @@ import httpx
 
 from kvseo import __version__
 
-_USER_AGENT = f"kvseo/{__version__} (+https://github.com/kvadrum/kvseo)"
+USER_AGENT = f"kvseo/{__version__} (+https://github.com/kvadrum/kvseo)"
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _MAX_BYTES = 5 * 1024 * 1024
 
@@ -52,7 +52,7 @@ async def fetch(url: str, *, client: httpx.AsyncClient | None = None) -> FetchRe
         timeout=_TIMEOUT,
         follow_redirects=True,
         max_redirects=5,
-        headers={"User-Agent": _USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
+        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
     )
     start = time.monotonic()
     try:

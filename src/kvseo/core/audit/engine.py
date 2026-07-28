@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from kvseo.connectors.base import ConnectorError
 from kvseo.connectors.psi import PsiConnector
 from kvseo.core.audit.checks import REGISTRY, AuditContext, CheckFn, CheckResult
-from kvseo.core.audit.document import ParsedDocument
+from kvseo.core.audit.document import ParsedDocument, is_internal
 from kvseo.core.audit.fetcher import FetchError, fetch
 from kvseo.core.audit.link_checker import probe_links
 from kvseo.core.audit.scoring import score
@@ -61,7 +61,6 @@ async def run_audit(
     psi: PsiConnector | None = None,
     fetch_client: httpx.AsyncClient | None = None,
     check_internal_links: bool = False,
-    link_client: httpx.AsyncClient | None = None,
 ) -> AuditResult:
     audit_id = uuid.uuid4()
     _insert_running(db_engine, audit_id, url, keyword)
@@ -105,14 +104,14 @@ async def run_audit(
         except ConnectorError:
             psi_result = None  # cwv.* checks skip; the score covers the rest
 
-    # Off by default (04 §9): up to 50 HEAD requests against the audited host
-    # is the slowest non-PSI stage and the most likely thing to make a first
-    # audit feel broken. None (not {}) when unrequested, so the check skips.
+    # Off by default (04 §9): up to MAX_LINKS HEAD requests against the audited
+    # host is the slowest non-PSI stage and the most likely thing to make a
+    # first audit feel broken. None (not {}) when unrequested, so the check skips.
     link_status = None
     if check_internal_links:
         host = urlparse(fetched.final_url).netloc
-        internal = [link.href for link in doc.links() if urlparse(link.href).netloc == host]
-        link_status = await probe_links(internal, client=link_client)
+        internal = [link.href for link in doc.links() if is_internal(link.href, host)]
+        link_status = await probe_links(internal)
 
     ctx = AuditContext(
         fetched_url=fetched.final_url,

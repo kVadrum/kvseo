@@ -9,12 +9,12 @@ database's ``alembic_version`` always reflects a known migration.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import DatabaseError
 
 from kvseo import __version__
 from kvseo.config import paths
@@ -89,22 +89,26 @@ def migrate(db_path: Path) -> None:
 def stored_revision(db_path: Path) -> str | None:
     """The database's current ``alembic_version``, or None if there isn't one.
 
-    Raw SQL rather than Alembic on purpose: this runs ahead of every database
-    command, and reaching for Alembic here would undo the cold-start deferral
-    that ``migrate()`` goes out of its way to preserve. A missing file or a
-    missing ``alembic_version`` table both read as None — an unmigrated
-    database is not a mismatch, it is one ``migrate()`` away from correct.
+    Stdlib sqlite3 rather than Alembic or an Engine on purpose: this probe
+    runs ahead of every database command, so it must stay free of the ~100ms
+    alembic import ``migrate()`` defers — and Engine construction with its
+    WAL/FK pragmas is machinery a one-row read doesn't need. A missing file,
+    a missing ``alembic_version`` table, and an unreadable database all read
+    as None — an unmigrated database is not a mismatch, it is one
+    ``migrate()`` away from correct.
     """
     if not db_path.exists():
         return None
-    engine = get_engine(db_path)
     try:
-        with engine.connect() as conn:
-            row = conn.execute(text("SELECT version_num FROM alembic_version")).first()
-    except DatabaseError:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    except sqlite3.Error:
         return None
     finally:
-        engine.dispose()
+        conn.close()
     return str(row[0]) if row else None
 
 

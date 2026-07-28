@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from selectolax.parser import HTMLParser
 
@@ -46,9 +46,16 @@ class SchemaBlock:
 
 
 class ParsedDocument:
+    """Immutable after construction; the list accessors parse once and cache —
+    the checks and the engine may each call them several times per audit."""
+
     def __init__(self, html: str, base_url: str) -> None:
         self._tree = HTMLParser(html)
         self._base = base_url
+        self._headings: list[Heading] | None = None
+        self._links: list[Link] | None = None
+        self._images: list[Image] | None = None
+        self._schema_blocks: list[SchemaBlock] | None = None
 
     def title(self) -> str | None:
         node = self._tree.css_first("title")
@@ -81,10 +88,12 @@ class ParsedDocument:
 
     def headings(self) -> list[Heading]:
         # CSS selection returns nodes in document order — needed for hierarchy.
-        out = []
-        for node in self._tree.css("h1, h2, h3, h4, h5, h6"):
-            out.append(Heading(level=int(node.tag[1]), text=node.text(strip=True)))
-        return out
+        if self._headings is None:
+            out = []
+            for node in self._tree.css("h1, h2, h3, h4, h5, h6"):
+                out.append(Heading(level=int(node.tag[1]), text=node.text(strip=True)))
+            self._headings = out
+        return self._headings
 
     def links(self) -> list[Link]:
         """Anchors with an href, resolved to absolute.
@@ -95,65 +104,92 @@ class ParsedDocument:
         makes one malformed anchor able to take down whatever is iterating —
         which is every caller, checks and engine alike.
         """
-        out = []
-        for node in self._tree.css("a[href]"):
-            href = node.attributes.get("href") or ""
-            try:
-                resolved = urljoin(self._base, href)
-            except ValueError:
-                continue
-            out.append(
-                Link(
-                    href=resolved,
-                    text=node.text(strip=True),
-                    rel=(node.attributes.get("rel") or ""),
-                    target=(node.attributes.get("target") or ""),
+        if self._links is None:
+            out = []
+            for node in self._tree.css("a[href]"):
+                href = node.attributes.get("href") or ""
+                try:
+                    resolved = urljoin(self._base, href)
+                except ValueError:
+                    continue
+                out.append(
+                    Link(
+                        href=resolved,
+                        text=node.text(strip=True),
+                        rel=(node.attributes.get("rel") or ""),
+                        target=(node.attributes.get("target") or ""),
+                    )
                 )
-            )
-        return out
+            self._links = out
+        return self._links
 
     def images(self) -> list[Image]:
-        out = []
-        for node in self._tree.css("img"):
-            out.append(
-                Image(
-                    src=urljoin(self._base, node.attributes.get("src") or ""),
-                    alt=node.attributes.get("alt"),
-                    width=node.attributes.get("width"),
-                    height=node.attributes.get("height"),
+        if self._images is None:
+            out = []
+            for node in self._tree.css("img"):
+                out.append(
+                    Image(
+                        src=urljoin(self._base, node.attributes.get("src") or ""),
+                        alt=node.attributes.get("alt"),
+                        width=node.attributes.get("width"),
+                        height=node.attributes.get("height"),
+                    )
                 )
-            )
-        return out
+            self._images = out
+        return self._images
 
     def schema_blocks(self) -> list[SchemaBlock]:
-        out = []
-        for node in self._tree.css('script[type="application/ld+json"]'):
-            raw = node.text() or ""
-            try:
-                parsed: Any = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                out.append(SchemaBlock(raw=raw, types=[], valid_json=False, contexts=[]))
-                continue
-            out.append(
-                SchemaBlock(
-                    raw=raw,
-                    types=_schema_types(parsed),
-                    valid_json=True,
-                    contexts=_schema_contexts(parsed),
+        if self._schema_blocks is None:
+            out = []
+            for node in self._tree.css('script[type="application/ld+json"]'):
+                raw = node.text() or ""
+                try:
+                    parsed: Any = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    out.append(SchemaBlock(raw=raw, types=[], valid_json=False, contexts=[]))
+                    continue
+                nodes = _schema_nodes(parsed)
+                out.append(
+                    SchemaBlock(
+                        raw=raw,
+                        types=_schema_types(nodes),
+                        valid_json=True,
+                        contexts=_schema_contexts(nodes),
+                    )
                 )
-            )
-        return out
+            self._schema_blocks = out
+        return self._schema_blocks
 
 
-def _schema_contexts(parsed: Any) -> list[str]:
-    """Pull @context values out of a parsed JSON-LD block (object or list).
+def is_internal(href: str, host: str) -> bool:
+    """Whether ``href`` targets ``host`` — THE internal/external boundary.
+
+    Bare netloc equality, no www/port/case normalization. The internal-link
+    count, the noopener check, and the engine's probe list must all apply the
+    same test or one audit disagrees with itself about which links are
+    internal — refine the boundary here or nowhere.
+    """
+    return urlparse(href).netloc == host
+
+
+def is_external(href: str, host: str) -> bool:
+    """Whether ``href`` leaves ``host`` for another one.
+
+    Not the negation of ``is_internal``: hrefs with no netloc (mailto:, tel:,
+    javascript:) are neither internal nor external.
+    """
+    return urlparse(href).netloc not in ("", host)
+
+
+def _schema_contexts(nodes: list[dict[str, Any]]) -> list[str]:
+    """Pull @context values out of a block's JSON-LD nodes.
 
     @context can be a bare string, a list, or an object mapping prefixes to
     vocabularies; only string forms are collected, which is what the
     schema.org-vocabulary check needs to assert.
     """
     contexts: list[str] = []
-    for item in _schema_nodes(parsed):
+    for item in nodes:
         value = item.get("@context")
         if isinstance(value, str):
             contexts.append(value)
@@ -164,16 +200,10 @@ def _schema_contexts(parsed: Any) -> list[str]:
     return contexts
 
 
-def _schema_types(parsed: Any) -> list[str]:
-    """Pull @type values out of a parsed JSON-LD block (object or list).
-
-    Descends into ``@graph``. That wrapper is not an edge case — it is what
-    Yoast, RankMath and most WordPress SEO plugins emit, so a reader that only
-    looks at the top level sees no ``@type`` on a large share of real pages and
-    reports valid structured data as broken.
-    """
+def _schema_types(nodes: list[dict[str, Any]]) -> list[str]:
+    """Pull @type values out of a block's JSON-LD nodes."""
     types: list[str] = []
-    for item in _schema_nodes(parsed):
+    for item in nodes:
         value = item.get("@type")
         if isinstance(value, str):
             types.append(value)
@@ -184,7 +214,13 @@ def _schema_types(parsed: Any) -> list[str]:
 
 def _schema_nodes(parsed: Any) -> list[dict[str, Any]]:
     """Every JSON-LD node in a block: top-level objects plus any ``@graph``
-    members, one level of nesting deep (which is the shape in the wild)."""
+    members, one level of nesting deep (which is the shape in the wild).
+
+    ``@graph`` is not an edge case — it is what Yoast, RankMath and most
+    WordPress SEO plugins emit, so a reader that only looks at the top level
+    sees no ``@type`` on a large share of real pages and reports valid
+    structured data as broken.
+    """
     items = parsed if isinstance(parsed, list) else [parsed]
     nodes: list[dict[str, Any]] = []
     for item in items:

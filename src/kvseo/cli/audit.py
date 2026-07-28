@@ -26,6 +26,7 @@ from kvseo.connectors.psi import PsiConnector
 from kvseo.core.advisor.client import AdvisorRun, prioritize
 from kvseo.core.advisor.context import AdvisorError
 from kvseo.core.audit.engine import AuditResult, run_audit
+from kvseo.core.audit.link_checker import MAX_LINKS
 from kvseo.core.report.renderer import render
 
 _REPORT_FORMATS = {"html", "md", "json", "all", "none"}
@@ -55,7 +56,7 @@ def audit(
         bool,
         typer.Option(
             "--check-internal-links",
-            help="Also HEAD-check internal links (slower; up to 50 requests to the audited host).",
+            help=f"Also HEAD-check internal links (slower; up to {MAX_LINKS} requests to the audited host).",
         ),
     ] = False,
     json_out: Annotated[bool, typer.Option("--json", help="Emit the full audit as JSON.")] = False,
