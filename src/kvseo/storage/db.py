@@ -249,19 +249,35 @@ def backup_to(db_path: Path, dest: Path) -> None:
     schema-version guard on purpose: this captures the file as it stands, and
     the two moments you most want a copy are right before an upgrade and right
     after discovering the installed package is too old for it.
+
+    Failures are attributed by *where* they arise, because the same result code
+    means opposite things on either side of the copy. Opening ``dest`` can only
+    be about ``dest``; once it is open, SQLITE_CANTOPEN belongs to the source
+    (``sqlite3.connect`` is lazy, so ``backup()`` is where the source is first
+    actually read), while a full or failing disk belongs to ``dest``.
     """
     source = sqlite3.connect(db_path)
     try:
-        target = sqlite3.connect(dest)
+        try:
+            target = sqlite3.connect(dest)
+        except sqlite3.Error as exc:
+            raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
         try:
             source.backup(target)
+        except sqlite3.Error as exc:
+            _reject_unusable_file(db_path, exc)
+            raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
         finally:
             target.close()
-    except sqlite3.Error as exc:
-        _reject_unusable_file(db_path, exc)
-        raise
     finally:
         source.close()
+
+
+def _backup_dest_message(dest: Path, exc: BaseException) -> str:
+    return (
+        f"could not write the backup to {dest} (SQLite: {exc}). Check that the directory exists, is "
+        f"writable, and has room — or pass a different --output."
+    )
 
 
 def vacuum(db_path: Path) -> None:

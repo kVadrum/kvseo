@@ -17,6 +17,7 @@ from sqlalchemy import text
 from typer.testing import CliRunner
 
 from kvseo.cli import app
+from kvseo.cli import db as cli_db
 from kvseo.storage.db import HEAD_REVISION, get_engine, stored_revision
 
 runner = CliRunner()
@@ -132,6 +133,51 @@ def test_backup_refuses_to_overwrite(data_dir: Path, tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "refusing to overwrite" in result.output
     assert dest.read_text(encoding="utf-8") == "something the user cares about"
+
+
+def test_two_default_backups_in_the_same_second_both_land(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default name is ours, so a same-second collision is ours to absorb.
+
+    The clock is frozen rather than raced: two real invocations usually land in
+    different seconds, so a timing-dependent version of this test would pass
+    without ever exercising the collision it exists to pin. An explicit --output
+    keeps the strict refusal (see the test above) — only the generated name
+    falls back to a suffix.
+    """
+    monkeypatch.setattr(cli_db, "_BACKUP_TS", "frozen")
+
+    assert runner.invoke(app, ["db", "backup"]).exit_code == 0
+    result = runner.invoke(app, ["db", "backup"])
+
+    assert result.exit_code == 0, result.output
+    copies = sorted(p.name for p in (data_dir / "backups").glob("kvseo-*.db"))
+    assert copies == ["kvseo-frozen-2.db", "kvseo-frozen.db"]
+    for name in copies:
+        assert stored_revision(data_dir / "backups" / name) == HEAD_REVISION
+
+
+def test_backup_blames_the_output_path_not_the_source(data_dir: Path, tmp_path: Path) -> None:
+    """A destination that cannot be written must not indict a healthy source.
+
+    The failing code (SQLITE_CANTOPEN) is the same one a missing source raises,
+    so attributing it by position rather than by path sent the user to fix
+    $KVSEO_DATA_DIR when the actual problem was the --output they just passed.
+    """
+    unwritable = tmp_path / "unwritable"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+    try:
+        result = runner.invoke(app, ["db", "backup", "--output", str(unwritable / "snapshot.db")])
+    finally:
+        unwritable.chmod(0o700)
+
+    assert result.exit_code == 3
+    assert "could not write the backup" in result.output
+    assert "snapshot.db" in result.output
+    assert str(data_dir / "kvseo.db") not in result.output
+    assert "KVSEO_DATA_DIR" not in result.output
 
 
 def test_backup_does_not_migrate(

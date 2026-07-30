@@ -12,6 +12,7 @@ that wants its own retention semantics and tests rather than a ride-along.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -69,15 +70,25 @@ def backup(
     except storage.DatabaseFileError as exc:
         fail_on_storage_refusal(exc)
 
-    dest = output or paths.data_dir() / "backups" / f"kvseo-{datetime.now(UTC).strftime(_BACKUP_TS)}.db"
-    if dest.exists():
-        fail(f"refusing to overwrite {dest} — pass a different --output.", code=2)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    # An explicit --output is a path the user chose, so a collision there is
+    # theirs to resolve. A default name is ours, and it must not fail just
+    # because the last backup was in the same second.
+    if output is not None:
+        dest = output
+        if dest.exists():
+            fail(f"refusing to overwrite {dest} — pass a different --output.", code=2)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        dest = _free_default_path(paths.data_dir() / "backups")
 
     try:
         storage.backup_to(db_path, dest)
     except storage.DatabaseFileError as exc:
-        dest.unlink(missing_ok=True)
+        # A failed copy can leave a partial file worth removing. A failed *open*
+        # leaves nothing and may sit in a directory we have no write access to —
+        # which is one of the reasons the open failed — so never insist on this.
+        with suppress(OSError):
+            dest.unlink(missing_ok=True)
         fail_on_storage_refusal(exc)
 
     typer.echo(f"backed up database (schema {revision or 'unversioned'}) → {dest} ({_size(dest)})")
@@ -108,6 +119,24 @@ def vacuum() -> None:
         typer.echo(f"vacuumed database: {_bytes(before)} → {_bytes(after)} ({_bytes(reclaimed)} reclaimed)")
     else:
         typer.echo(f"vacuumed database: {_bytes(after)}, nothing to reclaim")
+
+
+def _free_default_path(backups_dir: Path) -> Path:
+    """A free ``kvseo-<ts>.db`` in ``backups_dir``, suffixed only if it must be.
+
+    06 §4.10.2 fixes the default name at one-second resolution, so two backups
+    in the same second collide. Keeping the documented shape and falling back to
+    ``-2``, ``-3``, … costs nothing in the normal case and stops a scripted
+    "back up, then back up again" from failing on a name we chose ourselves.
+    """
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime(_BACKUP_TS)
+    dest = backups_dir / f"kvseo-{stamp}.db"
+    nth = 2
+    while dest.exists():
+        dest = backups_dir / f"kvseo-{stamp}-{nth}.db"
+        nth += 1
+    return dest
 
 
 def _size(path: Path) -> str:
