@@ -36,7 +36,18 @@ def open_db() -> Engine:
     try:
         return open_engine()
     except (DatabaseFileError, SchemaVersionError) as exc:
-        fail(str(exc), code=3)
+        fail_on_storage_refusal(exc)
+
+
+def fail_on_storage_refusal(exc: DatabaseFileError | SchemaVersionError) -> NoReturn:
+    """Exit 3 on a storage-layer refusal — the CLI's half of the 06 §2 contract.
+
+    Kept separate from ``open_db`` because ``kvseo db backup`` reaches the
+    database without going through it: backing up deliberately skips the
+    migrate-on-open, so it needs the same refusal-to-exit-code policy without
+    the migration. One home for *which* code, two callers for *when*.
+    """
+    fail(str(exc), code=3)
 
 
 def parse_audit_id(value: str) -> uuid.UUID:

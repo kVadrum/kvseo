@@ -90,7 +90,7 @@ def _reject_unusable_file(db_path: Path, exc: BaseException) -> None:
     else:
         message = (
             f"the file at {db_path} is not a usable kvseo database (SQLite: {driver_exc}). Move or delete it "
-            f"and re-run `kvseo init`. If it held audit history you need, restore a backup of it instead."
+            f"and re-run `kvseo init`. If it held audit history you need, restore a `kvseo db backup` instead."
         )
     raise DatabaseFileError(message) from exc
 
@@ -208,6 +208,49 @@ def check_schema_version(db_path: Path) -> None:
         f"understands (latest known: '{HEAD_REVISION}'). Upgrade kvseo with "
         f"`pip install -U kvseo`, or point $KVSEO_DATA_DIR at a different database."
     )
+
+
+def backup_to(db_path: Path, dest: Path) -> None:
+    """Copy the database to ``dest`` with SQLite's online backup API (07 §5).
+
+    Safe to run with the database in use — the API copies a consistent snapshot
+    page by page and restarts if a writer commits mid-copy, which a filesystem
+    ``cp`` of a live WAL database cannot promise. No migration and no
+    schema-version guard on purpose: this captures the file as it stands, and
+    the two moments you most want a copy are right before an upgrade and right
+    after discovering the installed package is too old for it.
+    """
+    source = sqlite3.connect(db_path)
+    try:
+        target = sqlite3.connect(dest)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    except sqlite3.Error as exc:
+        _reject_unusable_file(db_path, exc)
+        raise
+    finally:
+        source.close()
+
+
+def vacuum(db_path: Path) -> None:
+    """Rebuild the database, reclaiming free pages (06 §4.10.3).
+
+    ``isolation_level=None`` because VACUUM cannot run inside a transaction and
+    stdlib sqlite3 otherwise opens one implicitly. Checkpoints the WAL first:
+    VACUUM rewrites the main file, so without a checkpoint the reclaimed space
+    can still be sitting in ``-wal`` and the file gets bigger, not smaller.
+    """
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+    except sqlite3.Error as exc:
+        _reject_unusable_file(db_path, exc)
+        raise
+    finally:
+        conn.close()
 
 
 def open_engine() -> Engine:

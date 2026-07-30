@@ -98,6 +98,20 @@ Config lives in `~/.config/kvseo/` and data in `~/.local/share/kvseo/` (XDG;
 `%APPDATA%` / `%LOCALAPPDATA%` on Windows). Override either with the
 `KVSEO_CONFIG_DIR` / `KVSEO_DATA_DIR` environment variables.
 
+## Backups
+
+Your history is one SQLite file, so keeping a copy is cheap:
+
+```console
+$ kvseo db backup                        # timestamped copy into <data dir>/backups/
+$ kvseo db backup --output ~/kvseo.db    # …or wherever you want it
+$ kvseo db vacuum                        # reclaim space after pruning old audits
+```
+
+`db backup` uses SQLite's online backup API, so it is safe to run while kvseo is
+working — unlike copying the file yourself. Filesystem snapshots (ZFS, btrfs,
+Time Machine) cover you too, for the same single-file reason.
+
 ## License
 
 [MIT](./LICENSE) — free to use, modify, and distribute. KeMeK Network © 2026.

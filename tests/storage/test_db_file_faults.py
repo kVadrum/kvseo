@@ -153,7 +153,7 @@ def test_non_sqlite_exceptions_are_not_file_faults() -> None:
 # --- The CLI contract ------------------------------------------------------
 
 
-@pytest.mark.parametrize("command", [["init"], ["cost"]])
+@pytest.mark.parametrize("command", [["init"], ["cost"], ["db", "migrate"], ["db", "backup"], ["db", "vacuum"]])
 def test_cli_exits_3_on_a_file_that_is_not_a_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
 ) -> None:
