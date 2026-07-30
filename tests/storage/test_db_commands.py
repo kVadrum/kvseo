@@ -9,6 +9,7 @@ build considers too new — that last one being exactly when a copy matters most
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -102,7 +103,9 @@ def test_backup_writes_a_timestamped_copy(data_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     backups = list((data_dir / "backups").glob("kvseo-*.db"))
     assert len(backups) == 1
-    assert backups[0].name.startswith("kvseo-")
+    # 06 §4.10.2 fixes the shape as kvseo-YYYYMMDD-HHMMSS.db; a bare startswith
+    # check would let the format string rot to anything and stay green.
+    assert re.fullmatch(r"kvseo-\d{8}-\d{6}\.db", backups[0].name), backups[0].name
     assert str(backups[0]) in result.output
 
 
@@ -318,14 +321,16 @@ def test_backup_survives_a_concurrent_writer(data_dir: Path) -> None:
     assert stored_revision(copy) == HEAD_REVISION
 
 
-def test_vacuum_refuses_rather_than_underreporting_under_a_reader(data_dir: Path) -> None:
-    """A concurrent *reader* must not produce "nothing to reclaim" after reclaiming.
+def test_vacuum_under_a_reader_succeeds_with_a_deferred_reclaim(data_dir: Path) -> None:
+    """A concurrent reader defers the reclaim; it does not fail it.
 
-    VACUUM succeeds against a reader, but the rebuilt database lands in the WAL
-    and nothing can checkpoint it into the main file until that reader leaves —
-    so the size comparison saw before == after and reported no gain on a command
-    whose entire purpose is the gain. The opening checkpoint reports busy instead
-    of raising, which is what makes this detectable.
+    VACUUM succeeds against a reader — the rebuilt database lands in the WAL, and
+    SQLite folds it into the main file itself once that reader goes. So the
+    command must neither claim it reclaimed nothing (it reclaimed everything) nor
+    report failure (nothing needs redoing). It is the checkpoint *after* VACUUM
+    that observes this; the one before returns not-busy whatever is attached,
+    because the WAL is empty at that point — believing otherwise is what made an
+    earlier version of this guard inert.
     """
     db = data_dir / "kvseo.db"
     writer = sqlite3.connect(db, isolation_level=None)
@@ -342,15 +347,50 @@ def test_vacuum_refuses_rather_than_underreporting_under_a_reader(data_dir: Path
         reader.execute("SELECT count(*) FROM sites").fetchone()
 
         result = runner.invoke(app, ["db", "vacuum"])
+
+        assert result.exit_code == 0, result.output
+        assert "another connection is attached" in result.output
+        assert "Nothing to redo" in result.output
+        assert "nothing to reclaim" not in result.output
+        # The rebuild really did happen while the reader was still holding on.
+        assert db.stat().st_size == fat, "main file cannot shrink until the reader leaves"
     finally:
         reader.close()
 
-    assert result.exit_code == 1
-    assert "in use by another process" in result.output
-    assert "nothing to reclaim" not in result.output
-    # Once the reader lets go the command works and the space really was there.
-    assert runner.invoke(app, ["db", "vacuum"]).exit_code == 0
+    # SQLite folds the WAL in on the reader's departure — no second vacuum run.
+    sqlite3.connect(db).close()
     assert db.stat().st_size < fat
+
+
+def test_vacuum_counts_wal_resident_space_in_its_report(data_dir: Path) -> None:
+    """Freed pages sitting in the WAL still count as reclaimed footprint.
+
+    With a second connection attached, ``open_db().dispose()`` cannot checkpoint,
+    so the space the vacuum frees can be in ``-wal`` rather than the main file at
+    measurement time. Sizing the main file alone reported "nothing to reclaim"
+    over a real multi-megabyte reclaim.
+    """
+    db = data_dir / "kvseo.db"
+    # The writer must stay OPEN: closing it checkpoints the WAL away even with
+    # another connection attached, which is what made an earlier version of this
+    # test pass against the bug. No open transaction, so nothing blocks the
+    # checkpoint inside vacuum() — only the CLI's earlier measurement misses it.
+    writer = sqlite3.connect(db, isolation_level=None)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE bulk (blob TEXT)")
+        writer.executemany("INSERT INTO bulk VALUES (?)", [("x" * 2000,) for _ in range(1500)])
+        writer.execute("DROP TABLE bulk")
+        wal = db.with_name(db.name + "-wal")
+        assert wal.exists() and wal.stat().st_size > 1_000_000, "setup failed to leave space in the WAL"
+
+        result = runner.invoke(app, ["db", "vacuum"])
+    finally:
+        writer.close()
+
+    assert result.exit_code == 0, result.output
+    assert "nothing to reclaim" not in result.output, "a real reclaim was reported as none"
+    assert "reclaimed" in result.output
 
 
 def test_vacuum_refuses_a_database_newer_than_the_package(data_dir: Path) -> None:

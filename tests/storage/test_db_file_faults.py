@@ -198,6 +198,30 @@ def test_backup_to_blames_the_destination_when_it_cannot_be_opened(tmp_path: Pat
     assert "KVSEO_DATA_DIR" not in message
 
 
+def test_backup_to_blames_the_destination_when_the_copy_writes_to_garbage(tmp_path: Path) -> None:
+    """A destination that exists as a non-database must not indict the source.
+
+    This is the earlier misattribution with the sides swapped, and the advice it
+    produced was worse: it told a user whose *destination* was a stray text file
+    to delete their live database. An existing regular file opens lazily, so the
+    fault surfaces mid-copy — the branch that has to decide which side is at
+    fault. The CLI refuses an existing --output before reaching here, but this is
+    a public storage function and that shield is one flag away from gone.
+    """
+    source = tmp_path / "kvseo.db"
+    migrate(source)
+    dest = tmp_path / "precious-notes.txt"
+    dest.write_text("the user's precious notes", encoding="utf-8")
+
+    with pytest.raises(DatabaseFileError) as exc:
+        backup_to(source, dest)
+
+    message = str(exc.value)
+    assert str(dest) in message
+    assert str(source) not in message, "blaming the source tells the user to delete a healthy database"
+    assert "re-run `kvseo init`" not in message
+
+
 def test_backup_to_blames_the_source_when_the_copy_reads_garbage(tmp_path: Path) -> None:
     """The mid-copy handler: a bad source only shows up once backup() reads it.
 

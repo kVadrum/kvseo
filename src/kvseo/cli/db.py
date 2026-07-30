@@ -104,12 +104,23 @@ def vacuum() -> None:
     # schema guard rather than rebuilding a database this build can't describe.
     open_db().dispose()
 
-    before = db_path.stat().st_size
+    before = _footprint(db_path)
     try:
-        storage.vacuum(db_path)
+        landed = storage.vacuum(db_path)
     except (storage.DatabaseBusyError, storage.DatabaseFileError) as exc:
         fail_on_storage_refusal(exc)
-    after = db_path.stat().st_size
+    after = _footprint(db_path)
+
+    if not landed:
+        # The rebuild is committed; it just cannot be folded into the main file
+        # while another connection is attached. SQLite does that itself when the
+        # connection goes, so this is success — and saying otherwise sent the
+        # user to repeat a completed rebuild for nothing.
+        typer.echo(
+            "vacuumed database: rebuilt, but another connection is attached — "
+            "the space returns to the file when it disconnects. Nothing to redo."
+        )
+        return
 
     reclaimed = before - after
     if reclaimed > 0:
@@ -155,6 +166,21 @@ def _free_default_path(backups_dir: Path) -> Path:
         dest = backups_dir / f"kvseo-{stamp}-{nth}.db"
         nth += 1
     return dest
+
+
+def _footprint(db_path: Path) -> int:
+    """Bytes the database occupies on disk: the main file plus its WAL sidecar.
+
+    Measuring the main file alone under-reports. While another connection is
+    attached the WAL cannot be folded in, so freed pages sit there and a real
+    reclaim of megabytes reads as "nothing to reclaim" — the same class of
+    dishonest report this command has already produced once by another route.
+    """
+    total = db_path.stat().st_size
+    wal = db_path.with_name(db_path.name + "-wal")
+    if wal.exists():
+        total += wal.stat().st_size
+    return total
 
 
 def _size(path: Path) -> str:

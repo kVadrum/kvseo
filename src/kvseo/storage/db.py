@@ -142,14 +142,19 @@ def _reject_non_sqlite_file(db_path: Path) -> None:
 
     SQLite treats a *very* small file as an empty database and initialises over
     it, so a stray 1-byte file at the database path was silently destroyed by
-    the first command that opened it — measured: 1 byte overwritten, 50 bytes
-    and up already refused with SQLITE_NOTADB. Reading the magic closes the gap
-    below that threshold, and it is cheaper than the probe it precedes.
+    the first command that opened it. Measured on SQLite 3.45.1: 1 byte is
+    accepted and overwritten, 2 bytes and up already fail with SQLITE_NOTADB.
+    One byte is the whole gap; reading the magic closes it for good, and does so
+    more cheaply than the probe it precedes.
 
     A zero-byte file reads as empty and is left to SQLite, which is correct:
     that is the shape ``touch`` leaves behind and an empty file holds nothing to
     lose.
     """
+    if not db_path.is_file():
+        # Directories, FIFOs, devices: let SQLite produce the authoritative
+        # error rather than opening them here — a FIFO would block on read.
+        return
     try:
         with db_path.open("rb") as fh:
             header = fh.read(len(_SQLITE_MAGIC))
@@ -291,12 +296,19 @@ def backup_to(db_path: Path, dest: Path) -> None:
     the two moments you most want a copy are right before an upgrade and right
     after discovering the installed package is too old for it.
 
-    Failures are attributed by *where* they arise, because the same result code
-    means opposite things on either side of the copy. Opening ``dest`` can only
-    be about ``dest``; once it is open, SQLITE_CANTOPEN belongs to the source
-    (``sqlite3.connect`` is lazy, so ``backup()`` is where the source is first
-    actually read), while a full or failing disk belongs to ``dest``.
+    Failures are attributed by side, because the same result code means opposite
+    things at either end of the copy. Opening ``dest`` can only be about
+    ``dest``. The source's header is checked up front, which is what makes the
+    mid-copy branch decidable: after that, SQLITE_NOTADB can only be the
+    destination (an existing non-database file opens lazily and fails on first
+    write), while SQLITE_CORRUPT is the source revealing damage below the header
+    as ``backup()`` reads its pages.
+
+    Getting this backwards is worse than saying nothing: the previous version
+    told a user whose *destination* was a stray text file to delete their live
+    database.
     """
+    _reject_non_sqlite_file(db_path)
     try:
         source = sqlite3.connect(db_path)
     except sqlite3.Error as exc:
@@ -312,7 +324,10 @@ def backup_to(db_path: Path, dest: Path) -> None:
         try:
             source.backup(target)
         except sqlite3.Error as exc:
-            _reject_unusable_file(db_path, exc)
+            # Only corruption can still be the source's fault here — its header
+            # was verified above, so NOTADB at this point is the destination's.
+            if _primary_code(exc) == _SQLITE_CORRUPT:
+                _reject_unusable_file(db_path, exc)
             raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
         finally:
             target.close()
@@ -327,43 +342,48 @@ def _backup_dest_message(dest: Path, exc: BaseException) -> str:
     )
 
 
-def _checkpoint_or_busy(conn: sqlite3.Connection) -> None:
-    """Checkpoint the WAL into the main file, or raise if someone is blocking it.
+def _checkpoint(conn: sqlite3.Connection) -> bool:
+    """Fold the WAL into the main file. True if it landed, False if blocked.
 
-    ``PRAGMA wal_checkpoint`` reports failure in its result row (busy, log
-    frames, checkpointed frames) instead of raising, so the row must be read.
+    ``PRAGMA wal_checkpoint`` reports a blocked checkpoint in its result row
+    (busy, log frames, checkpointed frames) rather than raising, so the row has
+    to be read — the call looks successful either way. A database not in WAL
+    mode answers ``(0, -1, -1)``, which reads as landed, correctly: there is no
+    WAL to fold.
     """
     busy, _log_frames, _checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-    if busy:
-        raise DatabaseBusyError(_busy_message("VACUUM"))
+    return not busy
 
 
-def vacuum(db_path: Path) -> None:
+def vacuum(db_path: Path) -> bool:
     """Rebuild the database, reclaiming free pages (06 §4.10.3).
 
     ``isolation_level=None`` because VACUUM cannot run inside a transaction and
     stdlib sqlite3 otherwise opens one implicitly.
 
-    Raises ``DatabaseBusyError`` when another connection holds the database —
-    including a mere *reader*, which is not SQLite's rule but is the honest one
-    here. VACUUM does succeed against a reader; it just writes the rebuilt
-    database into the WAL, and nothing can move that into the main file while the
-    reader's snapshot stands. The caller measures the main file, so the result is
-    a command reporting that it reclaimed nothing having in fact reclaimed
-    megabytes.
+    Returns True when the reclaimed space is already visible in the main file,
+    and False when the rebuild is committed but still sitting in the WAL because
+    another connection is attached. **False is not a failure.** VACUUM succeeds
+    against a concurrent reader; the rebuilt database simply lands in the WAL,
+    and SQLite folds it into the main file by itself the moment that connection
+    goes — no retry, no second rebuild. Reporting that as an error told the user
+    to redo work that was already durably done, and a monthly cron overlapping
+    any other kvseo process would have alarmed on a success.
 
-    The checkpoint *after* VACUUM is what catches it. The one before cannot: the
-    WAL is typically empty at that point, so it returns "not busy" no matter who
-    else is attached. Neither raises on failure — the busy flag is in the return
-    row, which is why both are checked rather than executed and forgotten.
+    Only the checkpoint *after* VACUUM can observe this. The one before returns
+    "not busy" whatever else is attached, because the WAL is typically empty at
+    that point — the mistake that made an earlier version of this guard inert.
+
+    Raises ``DatabaseBusyError`` only when VACUUM itself cannot run, which is a
+    genuine failure: nothing was rebuilt and retrying is the fix.
     """
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
-        # Before: so the caller's "size before" sees a complete main file.
-        _checkpoint_or_busy(conn)
+        # Best-effort, so the caller's "before" measurement sees a folded-in
+        # file. Blocked here is not interesting; the one after VACUUM is.
+        _checkpoint(conn)
         conn.execute("VACUUM")
-        # After: this is the one that has to land, or nothing visibly shrank.
-        _checkpoint_or_busy(conn)
+        return _checkpoint(conn)
     except sqlite3.Error as exc:
         _reject_unusable_file(db_path, exc)
         _reject_busy(exc, needs="VACUUM")
