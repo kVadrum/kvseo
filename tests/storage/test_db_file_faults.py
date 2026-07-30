@@ -23,6 +23,7 @@ from kvseo.storage.db import (
     HEAD_REVISION,
     DatabaseFileError,
     _file_fault_code,
+    backup_to,
     check_schema_version,
     get_engine,
     migrate,
@@ -170,6 +171,25 @@ def test_sqlalchemy_wrapped_errors_are_classified_through_orig(tmp_path: Path) -
 
     assert not isinstance(exc.value, sqlite3.Error), "expected SQLAlchemy's wrapper, not the driver error"
     assert _file_fault_code(exc.value) == 26  # SQLITE_NOTADB, reached via .orig
+
+
+def test_backup_to_blames_the_source_when_the_copy_reads_garbage(tmp_path: Path) -> None:
+    """The mid-copy handler: a bad source only shows up once backup() reads it.
+
+    ``sqlite3.connect`` is lazy, so opening the source succeeds on any path and
+    the destination opens fine — the failure lands in the copy itself. Called
+    directly rather than through the CLI, which probes the source first and would
+    never let this path run.
+    """
+    source = _not_a_database(tmp_path / "kvseo.db")
+    dest = tmp_path / "backup.db"
+
+    with pytest.raises(DatabaseFileError) as exc:
+        backup_to(source, dest)
+
+    message = str(exc.value)
+    assert str(source) in message, "the copy failed reading the source, so the source is what to name"
+    assert "could not write the backup" not in message
 
 
 # --- Sub-header-size files: SQLite would initialise over them ---------------
