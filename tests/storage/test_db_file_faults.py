@@ -173,6 +173,31 @@ def test_sqlalchemy_wrapped_errors_are_classified_through_orig(tmp_path: Path) -
     assert _file_fault_code(exc.value) == 26  # SQLITE_NOTADB, reached via .orig
 
 
+def test_backup_to_blames_the_destination_when_it_cannot_be_opened(tmp_path: Path) -> None:
+    """A destination that will not open must not indict a healthy source.
+
+    SQLITE_CANTOPEN is the same code either side of the copy, so attributing it
+    by position rather than by path told the user to fix $KVSEO_DATA_DIR when the
+    problem was the --output they had just passed.
+
+    A directory as the destination is the portable way to provoke this: opening
+    one as a database fails on every platform. The CLI-level version of this test
+    has to make a directory unwritable instead, which Windows does not honour.
+    """
+    source = tmp_path / "kvseo.db"
+    migrate(source)
+    dest = tmp_path / "i-am-a-directory"
+    dest.mkdir()
+
+    with pytest.raises(DatabaseFileError) as exc:
+        backup_to(source, dest)
+
+    message = str(exc.value)
+    assert str(dest) in message
+    assert str(source) not in message, "the source is healthy; naming it sends the user to the wrong fix"
+    assert "KVSEO_DATA_DIR" not in message
+
+
 def test_backup_to_blames_the_source_when_the_copy_reads_garbage(tmp_path: Path) -> None:
     """The mid-copy handler: a bad source only shows up once backup() reads it.
 

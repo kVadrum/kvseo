@@ -8,6 +8,7 @@ build considers too new — that last one being exactly when a copy matters most
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -158,12 +159,17 @@ def test_two_default_backups_in_the_same_second_both_land(
         assert stored_revision(data_dir / "backups" / name) == HEAD_REVISION
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows chmod only toggles a file's read-only flag; a read-only directory still accepts new files, "
+    "so the destination-open failure cannot be provoked this way. The attribution itself is covered "
+    "portably by test_backup_to_blames_the_destination_when_it_cannot_be_opened.",
+)
 def test_backup_blames_the_output_path_not_the_source(data_dir: Path, tmp_path: Path) -> None:
-    """A destination that cannot be written must not indict a healthy source.
+    """The CLI wiring for the above: an unwritable --output exits 3, not 1.
 
-    The failing code (SQLITE_CANTOPEN) is the same one a missing source raises,
-    so attributing it by position rather than by path sent the user to fix
-    $KVSEO_DATA_DIR when the actual problem was the --output they just passed.
+    The message-attribution logic is pinned portably at the ``backup_to`` level;
+    what this adds is that the CLI maps it to an exit code instead of crashing.
     """
     unwritable = tmp_path / "unwritable"
     unwritable.mkdir()
