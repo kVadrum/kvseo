@@ -77,18 +77,20 @@ def backup(
         dest = output
         if dest.exists():
             fail(f"refusing to overwrite {dest} — pass a different --output.", code=2)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        # exist_ok tolerates an existing *directory*, not an existing file, so a
+        # --output under a regular file raises FileExistsError. That is a bad
+        # flag value (06 §2 exit 2), not a crash.
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            fail(f"cannot create the directory for {dest} ({exc.strerror}) — pass a different --output.", code=2)
     else:
         dest = _free_default_path(paths.data_dir() / "backups")
 
     try:
         storage.backup_to(db_path, dest)
-    except storage.DatabaseFileError as exc:
-        # A failed copy can leave a partial file worth removing. A failed *open*
-        # leaves nothing and may sit in a directory we have no write access to —
-        # which is one of the reasons the open failed — so never insist on this.
-        with suppress(OSError):
-            dest.unlink(missing_ok=True)
+    except (storage.DatabaseBusyError, storage.DatabaseFileError) as exc:
+        _remove_partial_backup(dest)
         fail_on_storage_refusal(exc)
 
     typer.echo(f"backed up database (schema {revision or 'unversioned'}) → {dest} ({_size(dest)})")
@@ -105,13 +107,8 @@ def vacuum() -> None:
     before = db_path.stat().st_size
     try:
         storage.vacuum(db_path)
-    except storage.DatabaseFileError as exc:
+    except (storage.DatabaseBusyError, storage.DatabaseFileError) as exc:
         fail_on_storage_refusal(exc)
-    except storage.DatabaseBusyError as exc:
-        # 06 §2 has no lock-contention code and says not to add any ad-hoc, so
-        # this is exit 1 — "general error (caught exception)". Caught is the
-        # operative word: what this replaces was an uncaught SQLite traceback.
-        fail(str(exc), code=1)
     after = db_path.stat().st_size
 
     reclaimed = before - after
@@ -119,6 +116,22 @@ def vacuum() -> None:
         typer.echo(f"vacuumed database: {_bytes(before)} → {_bytes(after)} ({_bytes(reclaimed)} reclaimed)")
     else:
         typer.echo(f"vacuumed database: {_bytes(after)}, nothing to reclaim")
+
+
+def _remove_partial_backup(dest: Path) -> None:
+    """Best-effort cleanup of a backup that failed part-way.
+
+    Sidecars included: the target opens as a fresh database in rollback-journal
+    mode, so a failed copy can leave a ``-journal`` (or ``-wal``) with no
+    matching ``.db`` in the directory the user is told to trust for restores.
+
+    Best-effort because ``unlink`` needs write permission on the destination
+    directory, and not having it is one of the reasons the backup failed — a
+    cleanup that raises would replace the real error with a worse one.
+    """
+    for path in (dest, dest.with_name(dest.name + "-journal"), dest.with_name(dest.name + "-wal")):
+        with suppress(OSError):
+            path.unlink(missing_ok=True)
 
 
 def _free_default_path(backups_dir: Path) -> Path:
@@ -129,7 +142,12 @@ def _free_default_path(backups_dir: Path) -> Path:
     ``-2``, ``-3``, … costs nothing in the normal case and stops a scripted
     "back up, then back up again" from failing on a name we chose ourselves.
     """
-    backups_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Not exit 2: the user did not choose this path, so the environment is
+        # what is wrong (06 §2 exit 3).
+        fail(f"cannot create the backups directory {backups_dir} ({exc.strerror}).", code=3)
     stamp = datetime.now(UTC).strftime(_BACKUP_TS)
     dest = backups_dir / f"kvseo-{stamp}.db"
     nth = 2

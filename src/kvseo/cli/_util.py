@@ -13,7 +13,7 @@ from typing import NoReturn
 import typer
 from sqlalchemy.engine import Engine
 
-from kvseo.storage.db import DatabaseFileError, SchemaVersionError, open_engine
+from kvseo.storage.db import DatabaseBusyError, DatabaseFileError, SchemaVersionError, open_engine
 
 
 def fail(message: str, *, code: int) -> NoReturn:
@@ -23,31 +23,37 @@ def fail(message: str, *, code: int) -> NoReturn:
 
 
 def open_db() -> Engine:
-    """``open_engine()`` with storage's two refusals mapped to exit 3.
+    """``open_engine()`` with storage's refusals mapped to their exit codes.
 
-    Storage raises; the CLI owns the exit-code contract (06 §2). 3 is
-    "configuration error", and both refusals are that: ``SchemaVersionError``
-    means the installed package and the database on disk disagree,
-    ``DatabaseFileError`` means the configured path holds no usable database at
-    all. Neither is the invocation being wrong, so neither is exit 2 — and
-    neither should reach the user as a traceback, which is what exit 1 looks
-    like from a CLI.
+    ``open_engine`` migrates, so every refusal storage raises is reachable from
+    here — including lock contention, which needs both a concurrent writer and
+    migrations actually pending.
     """
     try:
         return open_engine()
-    except (DatabaseFileError, SchemaVersionError) as exc:
+    except (DatabaseBusyError, DatabaseFileError, SchemaVersionError) as exc:
         fail_on_storage_refusal(exc)
 
 
-def fail_on_storage_refusal(exc: DatabaseFileError | SchemaVersionError) -> NoReturn:
-    """Exit 3 on a storage-layer refusal — the CLI's half of the 06 §2 contract.
+def fail_on_storage_refusal(exc: DatabaseBusyError | DatabaseFileError | SchemaVersionError) -> NoReturn:
+    """Map a storage-layer refusal to its exit code — the CLI's half of 06 §2.
 
-    Kept separate from ``open_db`` because ``kvseo db backup`` reaches the
-    database without going through it: backing up deliberately skips the
-    migrate-on-open, so it needs the same refusal-to-exit-code policy without
-    the migration. One home for *which* code, two callers for *when*.
+    **3** for the two fatal refusals: the environment is wrong, not the
+    invocation, so not exit 2. ``SchemaVersionError`` means the package and the
+    database disagree; ``DatabaseFileError`` means the path holds no usable
+    database at all.
+
+    **1** for contention, because 06 §2 has no lock-contention code and says not
+    to add one ad-hoc — so it lands in "general error (caught exception)", where
+    *caught* is the operative word. It is also the honest code: unlike the other
+    two, retrying unchanged is expected to work.
+
+    Kept separate from ``open_db`` because ``kvseo db backup`` and ``db vacuum``
+    reach the database outside it — backup deliberately skips the
+    migrate-on-open, and vacuum's own SQLite work happens after it. One home for
+    *which* code, several callers for *when*.
     """
-    fail(str(exc), code=3)
+    fail(str(exc), code=1 if isinstance(exc, DatabaseBusyError) else 3)
 
 
 def parse_audit_id(value: str) -> uuid.UUID:

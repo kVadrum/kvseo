@@ -180,6 +180,18 @@ def test_backup_blames_the_output_path_not_the_source(data_dir: Path, tmp_path: 
     assert "KVSEO_DATA_DIR" not in result.output
 
 
+def test_backup_output_under_a_regular_file_is_a_usage_error(data_dir: Path, tmp_path: Path) -> None:
+    """`exist_ok=True` tolerates an existing directory, not an existing file."""
+    not_a_dir = tmp_path / "a-plain-file"
+    not_a_dir.write_text("this is a file, not a directory", encoding="utf-8")
+
+    result = runner.invoke(app, ["db", "backup", "--output", str(not_a_dir / "snapshot.db")])
+
+    assert result.exit_code == 2
+    assert "cannot create the directory" in result.output
+    assert not_a_dir.read_text(encoding="utf-8") == "this is a file, not a directory"
+
+
 def test_backup_does_not_migrate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,6 +312,41 @@ def test_backup_survives_a_concurrent_writer(data_dir: Path) -> None:
     assert stored_revision(copy) == HEAD_REVISION
 
 
+def test_vacuum_refuses_rather_than_underreporting_under_a_reader(data_dir: Path) -> None:
+    """A concurrent *reader* must not produce "nothing to reclaim" after reclaiming.
+
+    VACUUM succeeds against a reader, but the rebuilt database lands in the WAL
+    and nothing can checkpoint it into the main file until that reader leaves —
+    so the size comparison saw before == after and reported no gain on a command
+    whose entire purpose is the gain. The opening checkpoint reports busy instead
+    of raising, which is what makes this detectable.
+    """
+    db = data_dir / "kvseo.db"
+    writer = sqlite3.connect(db, isolation_level=None)
+    writer.execute("CREATE TABLE bulk (blob TEXT)")
+    writer.executemany("INSERT INTO bulk VALUES (?)", [("x" * 2000,) for _ in range(1500)])
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writer.execute("DROP TABLE bulk")
+    writer.close()
+    fat = db.stat().st_size
+
+    reader = sqlite3.connect(db)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM sites").fetchone()
+
+        result = runner.invoke(app, ["db", "vacuum"])
+    finally:
+        reader.close()
+
+    assert result.exit_code == 1
+    assert "in use by another process" in result.output
+    assert "nothing to reclaim" not in result.output
+    # Once the reader lets go the command works and the space really was there.
+    assert runner.invoke(app, ["db", "vacuum"]).exit_code == 0
+    assert db.stat().st_size < fat
+
+
 def test_vacuum_refuses_a_database_newer_than_the_package(data_dir: Path) -> None:
     """Don't rebuild a file written to a schema this build cannot describe."""
     _set_revision(data_dir / "kvseo.db", "9999")
@@ -308,6 +355,48 @@ def test_vacuum_refuses_a_database_newer_than_the_package(data_dir: Path) -> Non
 
     assert result.exit_code == 3
     assert "9999" in result.output
+
+
+# --- contention on the migrate path (every command opens this way) ---------
+
+
+@pytest.mark.parametrize("command", [["init"], ["db", "migrate"], ["cost"]])
+def test_pending_migrations_under_a_writer_report_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    """Contention needs BOTH a writer and migrations actually pending.
+
+    v0.10.1 scoped the busy path to `db vacuum` on a measurement taken against a
+    database already at head, where migrate is a no-op read that contends with
+    nothing. With DDL to run it contends like anything else — and migrate is on
+    every command's path, not just a monthly maintenance one. Two ordinary
+    triggers: a first `init` over a pre-existing unversioned file, and the
+    migrate-on-open after any upgrade that ships a migration.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
+    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
+    db = data / "kvseo.db"
+    # A valid SQLite file with no alembic_version — migrate has real DDL to run.
+    seed = sqlite3.connect(db)
+    seed.execute("CREATE TABLE decoy (x)")
+    seed.commit()
+    seed.close()
+
+    writer = sqlite3.connect(db, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO decoy VALUES (1)")
+
+        result = runner.invoke(app, command)
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert result.exit_code == 1, result.output
+    assert "in use by another process" in result.output
+    assert "applying migrations" in result.output
 
 
 # --- group wiring ----------------------------------------------------------

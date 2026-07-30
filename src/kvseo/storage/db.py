@@ -102,27 +102,61 @@ def _reject_unusable_file(db_path: Path, exc: BaseException) -> None:
             f"file and not a directory, or point $KVSEO_DATA_DIR at a different directory."
         )
     else:
-        message = (
-            f"the file at {db_path} is not a usable kvseo database (SQLite: {driver_exc}). Move or delete it "
-            f"and re-run `kvseo init`. If it held audit history you need, restore a `kvseo db backup` instead."
-        )
+        message = _not_a_database_message(db_path, f"SQLite: {driver_exc}")
     raise DatabaseFileError(message) from exc
+
+
+def _not_a_database_message(db_path: Path, detail: str) -> str:
+    return (
+        f"the file at {db_path} is not a usable kvseo database ({detail}). Move or delete it and re-run "
+        f"`kvseo init`. If it held audit history you need, restore a `kvseo db backup` instead."
+    )
+
+
+def _busy_message(needs: str) -> str:
+    return (
+        f"the database is in use by another process, and {needs} needs exclusive access. "
+        f"Close any other running kvseo command and try again."
+    )
 
 
 def _reject_busy(exc: BaseException, *, needs: str) -> None:
     """Raise ``DatabaseBusyError`` if ``exc`` is lock contention; return otherwise.
 
-    Only worth calling from operations that need a lock they cannot get by
-    waiting their turn inside a normal transaction — ``VACUUM`` is the one such
-    operation today. Everything else either doesn't contend (WAL gives readers a
-    free pass) or is a genuine failure that should keep its own type.
+    Called from the operations that need a lock they cannot get by waiting their
+    turn inside a normal transaction: ``VACUUM``, and ``migrate`` when it has DDL
+    to run. A read, or a migrate with nothing to do, does not contend at all —
+    WAL gives readers a free pass — so those keep raising whatever they raise.
     """
     if _primary_code(exc) not in _BUSY_CODES:
         return
-    raise DatabaseBusyError(
-        f"the database is in use by another process, and {needs} needs exclusive access. "
-        f"Close any other running kvseo command and try again."
-    ) from exc
+    raise DatabaseBusyError(_busy_message(needs)) from exc
+
+
+# The first 16 bytes of every SQLite database file (https://sqlite.org/fileformat.html).
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _reject_non_sqlite_file(db_path: Path) -> None:
+    """Refuse a non-empty file whose header is not SQLite's, before any writer runs.
+
+    SQLite treats a *very* small file as an empty database and initialises over
+    it, so a stray 1-byte file at the database path was silently destroyed by
+    the first command that opened it — measured: 1 byte overwritten, 50 bytes
+    and up already refused with SQLITE_NOTADB. Reading the magic closes the gap
+    below that threshold, and it is cheaper than the probe it precedes.
+
+    A zero-byte file reads as empty and is left to SQLite, which is correct:
+    that is the shape ``touch`` leaves behind and an empty file holds nothing to
+    lose.
+    """
+    try:
+        with db_path.open("rb") as fh:
+            header = fh.read(len(_SQLITE_MAGIC))
+    except OSError:
+        return  # Let the driver raise the authoritative error for an unreadable path.
+    if header and header != _SQLITE_MAGIC:
+        raise DatabaseFileError(_not_a_database_message(db_path, "no SQLite file header"))
 
 
 def _register_sqlite_pragmas(engine: Engine) -> None:
@@ -168,6 +202,11 @@ def migrate(db_path: Path) -> None:
     database. ``check_schema_version`` catches the common case on its cheap
     stdlib probe; the wrap here covers corruption deeper in the file, which is
     only reachable once Alembic starts reading pages.
+
+    Raises ``DatabaseBusyError`` if another connection holds the write lock
+    *and* there are migrations to apply. Reaching that needs both halves: with
+    the database already at head this is a read and contends with nothing, which
+    is why the busy path is easy to miss when testing on a current database.
     """
     check_schema_version(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,6 +222,7 @@ def migrate(db_path: Path) -> None:
             engine.dispose()
     except Exception as exc:
         _reject_unusable_file(db_path, exc)
+        _reject_busy(exc, needs="applying migrations")
         raise
 
 
@@ -203,6 +243,7 @@ def stored_revision(db_path: Path) -> str | None:
     """
     if not db_path.exists():
         return None
+    _reject_non_sqlite_file(db_path)
     try:
         conn = sqlite3.connect(db_path)
     except sqlite3.Error as exc:
@@ -256,7 +297,13 @@ def backup_to(db_path: Path, dest: Path) -> None:
     (``sqlite3.connect`` is lazy, so ``backup()`` is where the source is first
     actually read), while a full or failing disk belongs to ``dest``.
     """
-    source = sqlite3.connect(db_path)
+    try:
+        source = sqlite3.connect(db_path)
+    except sqlite3.Error as exc:
+        # Eager failure here means the source path is not openable at all — a
+        # directory, say. The lazy-connect reasoning below does not cover it.
+        _reject_unusable_file(db_path, exc)
+        raise
     try:
         try:
             target = sqlite3.connect(dest)
@@ -280,23 +327,43 @@ def _backup_dest_message(dest: Path, exc: BaseException) -> str:
     )
 
 
+def _checkpoint_or_busy(conn: sqlite3.Connection) -> None:
+    """Checkpoint the WAL into the main file, or raise if someone is blocking it.
+
+    ``PRAGMA wal_checkpoint`` reports failure in its result row (busy, log
+    frames, checkpointed frames) instead of raising, so the row must be read.
+    """
+    busy, _log_frames, _checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if busy:
+        raise DatabaseBusyError(_busy_message("VACUUM"))
+
+
 def vacuum(db_path: Path) -> None:
     """Rebuild the database, reclaiming free pages (06 §4.10.3).
 
     ``isolation_level=None`` because VACUUM cannot run inside a transaction and
-    stdlib sqlite3 otherwise opens one implicitly. Checkpoints the WAL first:
-    VACUUM rewrites the main file, so without a checkpoint the reclaimed space
-    can still be sitting in ``-wal`` and the file gets bigger, not smaller.
+    stdlib sqlite3 otherwise opens one implicitly.
 
-    Raises ``DatabaseBusyError`` when another connection holds the database.
-    This is the one command here that needs exclusive access — measured: a
-    concurrent writer leaves ``backup``, ``migrate`` and the query commands
-    working, and stops only this one.
+    Raises ``DatabaseBusyError`` when another connection holds the database —
+    including a mere *reader*, which is not SQLite's rule but is the honest one
+    here. VACUUM does succeed against a reader; it just writes the rebuilt
+    database into the WAL, and nothing can move that into the main file while the
+    reader's snapshot stands. The caller measures the main file, so the result is
+    a command reporting that it reclaimed nothing having in fact reclaimed
+    megabytes.
+
+    The checkpoint *after* VACUUM is what catches it. The one before cannot: the
+    WAL is typically empty at that point, so it returns "not busy" no matter who
+    else is attached. Neither raises on failure — the busy flag is in the return
+    row, which is why both are checked rather than executed and forgotten.
     """
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        # Before: so the caller's "size before" sees a complete main file.
+        _checkpoint_or_busy(conn)
         conn.execute("VACUUM")
+        # After: this is the one that has to land, or nothing visibly shrank.
+        _checkpoint_or_busy(conn)
     except sqlite3.Error as exc:
         _reject_unusable_file(db_path, exc)
         _reject_busy(exc, needs="VACUUM")

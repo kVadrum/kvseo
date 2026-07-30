@@ -14,10 +14,13 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from typer.testing import CliRunner
 
 from kvseo.cli import app
 from kvseo.storage.db import (
+    HEAD_REVISION,
     DatabaseFileError,
     _file_fault_code,
     check_schema_version,
@@ -148,6 +151,62 @@ def test_extended_result_codes_are_recognised() -> None:
 
 def test_non_sqlite_exceptions_are_not_file_faults() -> None:
     assert _file_fault_code(ValueError("unrelated")) is None
+
+
+def test_sqlalchemy_wrapped_errors_are_classified_through_orig(tmp_path: Path) -> None:
+    """The ``orig`` unwrap exists for the Alembic path, so pin it on a real wrapper.
+
+    Only ``migrate()`` classifies a SQLAlchemy-wrapped error, and its own tests
+    never get that far — ``check_schema_version`` rejects a bad file on the cheap
+    probe first. Without this, the unwrap was asserted by docstring only.
+    """
+    db = _not_a_database(tmp_path / "kvseo.db")
+    engine = get_engine(db)
+    try:
+        with pytest.raises(SQLAlchemyError) as exc, engine.connect() as conn:
+            conn.execute(text("SELECT version_num FROM alembic_version"))
+    finally:
+        engine.dispose()
+
+    assert not isinstance(exc.value, sqlite3.Error), "expected SQLAlchemy's wrapper, not the driver error"
+    assert _file_fault_code(exc.value) == 26  # SQLITE_NOTADB, reached via .orig
+
+
+# --- Sub-header-size files: SQLite would initialise over them ---------------
+
+
+def test_a_one_byte_file_is_refused_and_left_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite treats a tiny file as an empty database and writes over it.
+
+    Measured before the header check: a 1-byte file at the database path was
+    replaced by a 144 KiB kvseo database, exit 0 — silent data loss on a file the
+    user owns. 50 bytes and up already failed with SQLITE_NOTADB, so the gap was
+    only below SQLite's own header threshold.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("KVSEO_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
+    stray = data_dir / "kvseo.db"
+    stray.write_bytes(b"x")
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 3, result.output
+    assert "not a usable kvseo database" in result.output
+    assert stray.read_bytes() == b"x", "init overwrote a file that was not a database"
+
+
+def test_a_zero_byte_file_is_still_treated_as_a_new_database(tmp_path: Path) -> None:
+    """The header check must not reject what `touch` leaves behind."""
+    db = tmp_path / "kvseo.db"
+    db.touch()
+
+    assert stored_revision(db) is None
+    migrate(db)
+    assert stored_revision(db) == HEAD_REVISION
 
 
 # --- The CLI contract ------------------------------------------------------
