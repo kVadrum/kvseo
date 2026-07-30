@@ -37,6 +37,64 @@ class SchemaVersionError(RuntimeError):
     """The database was written by a newer kvseo than the one running."""
 
 
+class DatabaseFileError(RuntimeError):
+    """The path configured for the database does not hold a usable one."""
+
+
+# SQLite primary result codes that indict the *file* rather than the statement
+# (https://sqlite.org/rescode.html). Extended codes carry the primary code in
+# their low byte — SQLITE_CORRUPT_VTAB is 11 | 1 << 8 — so mask before comparing.
+_SQLITE_CORRUPT = 11
+_SQLITE_CANTOPEN = 14
+_SQLITE_NOTADB = 26
+_FILE_FAULT_CODES = frozenset({_SQLITE_CORRUPT, _SQLITE_CANTOPEN, _SQLITE_NOTADB})
+
+
+def _file_fault_code(exc: BaseException) -> int | None:
+    """The SQLite primary result code, when ``exc`` blames the database file.
+
+    None for everything else, which is the whole point: a missing table on an
+    unmigrated database (SQLITE_ERROR), a locked file (SQLITE_BUSY), and a real
+    bug in a migration are all ``DatabaseError``s too, and each must keep the
+    handling it has today. Only these three codes mean "there is no database
+    here to work with" — the one class the user can actually act on. Both the
+    bare driver error and SQLAlchemy's wrapper are accepted, since the same
+    file is reached through stdlib sqlite3 and through an Engine.
+    """
+    driver_exc = getattr(exc, "orig", exc)
+    if not isinstance(driver_exc, sqlite3.Error):
+        return None
+    code = getattr(driver_exc, "sqlite_errorcode", None)
+    if not isinstance(code, int):
+        return None
+    primary = code & 0xFF
+    return primary if primary in _FILE_FAULT_CODES else None
+
+
+def _reject_unusable_file(db_path: Path, exc: BaseException) -> None:
+    """Raise ``DatabaseFileError`` if ``exc`` blames the file; return otherwise.
+
+    Callers pair this with their own ``raise`` so an unrecognised failure keeps
+    its original type and traceback — this only renames the one class of error
+    a user can fix, into a message that says how (06 §2 maps it to exit 3).
+    """
+    code = _file_fault_code(exc)
+    if code is None:
+        return
+    driver_exc = getattr(exc, "orig", exc)
+    if code == _SQLITE_CANTOPEN:
+        message = (
+            f"cannot open a database at {db_path} (SQLite: {driver_exc}). Check that the path is a writable "
+            f"file and not a directory, or point $KVSEO_DATA_DIR at a different directory."
+        )
+    else:
+        message = (
+            f"the file at {db_path} is not a usable kvseo database (SQLite: {driver_exc}). Move or delete it "
+            f"and re-run `kvseo init`. If it held audit history you need, restore a backup of it instead."
+        )
+    raise DatabaseFileError(message) from exc
+
+
 def _register_sqlite_pragmas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
@@ -75,15 +133,27 @@ def migrate(db_path: Path) -> None:
     single point where every entry path touches an existing database, ``kvseo
     init`` included. Without it, an unknown revision surfaces as a raw Alembic
     "can't locate revision" traceback instead of an actionable message.
-    """
-    from alembic import command  # deferred: ~100ms to import, and only migrate()
 
+    Raises ``DatabaseFileError`` if the path holds something that is not a
+    database. ``check_schema_version`` catches the common case on its cheap
+    stdlib probe; the wrap here covers corruption deeper in the file, which is
+    only reachable once Alembic starts reading pages.
+    """
     check_schema_version(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    command.upgrade(_alembic_config(db_path), "head")
-    engine = get_engine(db_path)
-    engine.connect().close()
-    engine.dispose()
+
+    from alembic import command  # deferred: ~100ms to import, and only migrate()
+
+    try:
+        command.upgrade(_alembic_config(db_path), "head")
+        engine = get_engine(db_path)
+        try:
+            engine.connect().close()
+        finally:
+            engine.dispose()
+    except Exception as exc:
+        _reject_unusable_file(db_path, exc)
+        raise
 
 
 def stored_revision(db_path: Path) -> str | None:
@@ -92,20 +162,26 @@ def stored_revision(db_path: Path) -> str | None:
     Stdlib sqlite3 rather than Alembic or an Engine on purpose: this probe
     runs ahead of every database command, so it must stay free of the ~100ms
     alembic import ``migrate()`` defers — and Engine construction with its
-    WAL/FK pragmas is machinery a one-row read doesn't need. A missing file,
-    a missing ``alembic_version`` table, and an unreadable database all read
-    as None — an unmigrated database is not a mismatch, it is one
-    ``migrate()`` away from correct.
+    WAL/FK pragmas is machinery a one-row read doesn't need. A missing file and
+    a missing ``alembic_version`` table both read as None — an unmigrated
+    database is not a mismatch, it is one ``migrate()`` away from correct.
+
+    A path that is not a database at all is the one failure that does *not*
+    read as None: it raises ``DatabaseFileError``. Migrating cannot fix it, and
+    this probe is the cheapest place to say so — before the alembic import,
+    where the alternative is a SQLAlchemy traceback out of ``upgrade``.
     """
     if not db_path.exists():
         return None
     try:
         conn = sqlite3.connect(db_path)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _reject_unusable_file(db_path, exc)
         return None
     try:
         row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _reject_unusable_file(db_path, exc)
         return None
     finally:
         conn.close()

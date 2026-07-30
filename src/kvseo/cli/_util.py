@@ -13,7 +13,7 @@ from typing import NoReturn
 import typer
 from sqlalchemy.engine import Engine
 
-from kvseo.storage.db import SchemaVersionError, open_engine
+from kvseo.storage.db import DatabaseFileError, SchemaVersionError, open_engine
 
 
 def fail(message: str, *, code: int) -> NoReturn:
@@ -23,15 +23,19 @@ def fail(message: str, *, code: int) -> NoReturn:
 
 
 def open_db() -> Engine:
-    """``open_engine()`` with the schema-version refusal mapped to exit 3.
+    """``open_engine()`` with storage's two refusals mapped to exit 3.
 
     Storage raises; the CLI owns the exit-code contract (06 §2). 3 is
-    "configuration error" — the installed package and the database on disk
-    disagree, which is the environment being wrong, not the invocation.
+    "configuration error", and both refusals are that: ``SchemaVersionError``
+    means the installed package and the database on disk disagree,
+    ``DatabaseFileError`` means the configured path holds no usable database at
+    all. Neither is the invocation being wrong, so neither is exit 2 — and
+    neither should reach the user as a traceback, which is what exit 1 looks
+    like from a CLI.
     """
     try:
         return open_engine()
-    except SchemaVersionError as exc:
+    except (DatabaseFileError, SchemaVersionError) as exc:
         fail(str(exc), code=3)
 
 
