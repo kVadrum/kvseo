@@ -41,34 +41,48 @@ class DatabaseFileError(RuntimeError):
     """The path configured for the database does not hold a usable one."""
 
 
-# SQLite primary result codes that indict the *file* rather than the statement
+class DatabaseBusyError(RuntimeError):
+    """Another connection holds a lock this operation needs to proceed."""
+
+
+# SQLite primary result codes, split by what the user has to do about them
 # (https://sqlite.org/rescode.html). Extended codes carry the primary code in
 # their low byte — SQLITE_CORRUPT_VTAB is 11 | 1 << 8 — so mask before comparing.
+_SQLITE_BUSY = 5
+_SQLITE_LOCKED = 6
 _SQLITE_CORRUPT = 11
 _SQLITE_CANTOPEN = 14
 _SQLITE_NOTADB = 26
+# Fatal: the file is not something we can work with, and retrying won't help.
 _FILE_FAULT_CODES = frozenset({_SQLITE_CORRUPT, _SQLITE_CANTOPEN, _SQLITE_NOTADB})
+# Transient: someone else holds the lock. Retrying later is the whole fix.
+_BUSY_CODES = frozenset({_SQLITE_BUSY, _SQLITE_LOCKED})
 
 
-def _file_fault_code(exc: BaseException) -> int | None:
-    """The SQLite primary result code, when ``exc`` blames the database file.
+def _primary_code(exc: BaseException) -> int | None:
+    """``exc``'s SQLite primary result code, or None if it isn't a SQLite error.
 
-    None for everything else, which is the whole point: a missing table on an
-    unmigrated database (SQLITE_ERROR), a locked file (SQLITE_BUSY), and a real
-    bug in a migration are all ``DatabaseError``s too, and each must keep the
-    handling it has today. Only these three codes mean "there is no database
-    here to work with" — the one class the user can actually act on. Both the
-    bare driver error and SQLAlchemy's wrapper are accepted, since the same
-    file is reached through stdlib sqlite3 and through an Engine.
+    Both the bare driver error and SQLAlchemy's wrapper are accepted, since the
+    same file is reached through stdlib sqlite3 and through an Engine.
     """
     driver_exc = getattr(exc, "orig", exc)
     if not isinstance(driver_exc, sqlite3.Error):
         return None
     code = getattr(driver_exc, "sqlite_errorcode", None)
-    if not isinstance(code, int):
-        return None
-    primary = code & 0xFF
-    return primary if primary in _FILE_FAULT_CODES else None
+    return code & 0xFF if isinstance(code, int) else None
+
+
+def _file_fault_code(exc: BaseException) -> int | None:
+    """The primary result code, when ``exc`` blames the database file.
+
+    None for everything else, which is the whole point: a missing table on an
+    unmigrated database (SQLITE_ERROR), a locked file (SQLITE_BUSY), and a real
+    bug in a migration are all ``DatabaseError``s too, and each must keep the
+    handling it has today. Only these three codes mean "there is no database
+    here to work with" — the one class no retry and no migration can fix.
+    """
+    code = _primary_code(exc)
+    return code if code in _FILE_FAULT_CODES else None
 
 
 def _reject_unusable_file(db_path: Path, exc: BaseException) -> None:
@@ -81,7 +95,7 @@ def _reject_unusable_file(db_path: Path, exc: BaseException) -> None:
     code = _file_fault_code(exc)
     if code is None:
         return
-    driver_exc = getattr(exc, "orig", exc)
+    driver_exc: BaseException = getattr(exc, "orig", exc)
     if code == _SQLITE_CANTOPEN:
         message = (
             f"cannot open a database at {db_path} (SQLite: {driver_exc}). Check that the path is a writable "
@@ -93,6 +107,22 @@ def _reject_unusable_file(db_path: Path, exc: BaseException) -> None:
             f"and re-run `kvseo init`. If it held audit history you need, restore a `kvseo db backup` instead."
         )
     raise DatabaseFileError(message) from exc
+
+
+def _reject_busy(exc: BaseException, *, needs: str) -> None:
+    """Raise ``DatabaseBusyError`` if ``exc`` is lock contention; return otherwise.
+
+    Only worth calling from operations that need a lock they cannot get by
+    waiting their turn inside a normal transaction — ``VACUUM`` is the one such
+    operation today. Everything else either doesn't contend (WAL gives readers a
+    free pass) or is a genuine failure that should keep its own type.
+    """
+    if _primary_code(exc) not in _BUSY_CODES:
+        return
+    raise DatabaseBusyError(
+        f"the database is in use by another process, and {needs} needs exclusive access. "
+        f"Close any other running kvseo command and try again."
+    ) from exc
 
 
 def _register_sqlite_pragmas(engine: Engine) -> None:
@@ -241,6 +271,11 @@ def vacuum(db_path: Path) -> None:
     stdlib sqlite3 otherwise opens one implicitly. Checkpoints the WAL first:
     VACUUM rewrites the main file, so without a checkpoint the reclaimed space
     can still be sitting in ``-wal`` and the file gets bigger, not smaller.
+
+    Raises ``DatabaseBusyError`` when another connection holds the database.
+    This is the one command here that needs exclusive access — measured: a
+    concurrent writer leaves ``backup``, ``migrate`` and the query commands
+    working, and stops only this one.
     """
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
@@ -248,6 +283,7 @@ def vacuum(db_path: Path) -> None:
         conn.execute("VACUUM")
     except sqlite3.Error as exc:
         _reject_unusable_file(db_path, exc)
+        _reject_busy(exc, needs="VACUUM")
         raise
     finally:
         conn.close()

@@ -9,6 +9,7 @@ build considers too new — that last one being exactly when a copy matters most
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pytest
@@ -210,6 +211,47 @@ def test_vacuum_reclaims_space_after_a_delete(data_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "reclaimed" in result.output
     assert db.stat().st_size < before
+
+
+def test_vacuum_reports_lock_contention_instead_of_raising(data_dir: Path) -> None:
+    """A concurrent writer is ordinary, so it must not surface as a traceback.
+
+    VACUUM is the only command here that needs exclusive access — backup,
+    migrate and the query commands all work against a live writer. Exit 1 per
+    06 §2 ("general error, caught exception"); the table has no code for lock
+    contention and says not to invent one.
+    """
+    hog = sqlite3.connect(data_dir / "kvseo.db", isolation_level=None)
+    try:
+        hog.execute("BEGIN IMMEDIATE")
+        hog.execute("INSERT INTO sites (id, origin) VALUES (?, 'holder.example')", (uuid.uuid4().bytes,))
+
+        result = runner.invoke(app, ["db", "vacuum"])
+
+        assert result.exit_code == 1
+        assert "in use by another process" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+    finally:
+        hog.execute("ROLLBACK")
+        hog.close()
+
+
+def test_backup_survives_a_concurrent_writer(data_dir: Path) -> None:
+    """07 §5's claim: safe to run with the database in use, unlike a plain cp."""
+    hog = sqlite3.connect(data_dir / "kvseo.db", isolation_level=None)
+    try:
+        hog.execute("BEGIN IMMEDIATE")
+        hog.execute("INSERT INTO sites (id, origin) VALUES (?, 'holder.example')", (uuid.uuid4().bytes,))
+
+        result = runner.invoke(app, ["db", "backup"])
+
+        assert result.exit_code == 0, result.output
+    finally:
+        hog.execute("ROLLBACK")
+        hog.close()
+
+    copy = next((data_dir / "backups").glob("kvseo-*.db"))
+    assert stored_revision(copy) == HEAD_REVISION
 
 
 def test_vacuum_refuses_a_database_newer_than_the_package(data_dir: Path) -> None:

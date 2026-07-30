@@ -40,13 +40,13 @@ def migrate() -> None:
 
     # open_db() is the migration: it carries both the upgrade and the exit-3
     # mapping, so this command stays a reporting wrapper around the shared path.
+    # Once it returns, the database is at head by definition — no second probe.
     open_db().dispose()
-    after = storage.stored_revision(db_path)
 
-    if before == after:
-        typer.echo(f"database already at schema {after}: {db_path}")
+    if before == storage.HEAD_REVISION:
+        typer.echo(f"database already at schema {storage.HEAD_REVISION}: {db_path}")
     else:
-        typer.echo(f"migrated database {before or '(unversioned)'} → {after}: {db_path}")
+        typer.echo(f"migrated database {before or '(unversioned)'} → {storage.HEAD_REVISION}: {db_path}")
 
 
 @app.command()
@@ -96,6 +96,11 @@ def vacuum() -> None:
         storage.vacuum(db_path)
     except storage.DatabaseFileError as exc:
         fail_on_storage_refusal(exc)
+    except storage.DatabaseBusyError as exc:
+        # 06 §2 has no lock-contention code and says not to add any ad-hoc, so
+        # this is exit 1 — "general error (caught exception)". Caught is the
+        # operative word: what this replaces was an uncaught SQLite traceback.
+        fail(str(exc), code=1)
     after = db_path.stat().st_size
 
     reclaimed = before - after
