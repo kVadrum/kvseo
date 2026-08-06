@@ -10,7 +10,7 @@ database's ``alembic_version`` always reflects a known migration.
 from __future__ import annotations
 
 import sqlite3
-from contextlib import suppress
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -176,13 +176,27 @@ def _reject_non_sqlite_file(db_path: Path) -> None:
 
 
 def _connect(db_path: Path, **kwargs: Any) -> sqlite3.Connection:
-    """``sqlite3.connect`` with the header guard applied first.
+    """Open an **existing** database, with the header guard applied first.
 
-    The one funnel for stdlib opens, so "no connection touches the file before
-    the header check" is a property of opening it — not of call ordering in the
-    CLI, which is where the guarantee lived while ``vacuum()`` relied on its
-    caller having probed the file already.
+    Two guarantees a bare ``sqlite3.connect`` does not give.
+
+    The header check runs before any connection touches the file, so "we never
+    initialise over something that is not a database" is a property of
+    *opening* it rather than of call ordering in the CLI.
+
+    And the file must already exist. ``sqlite3.connect`` opens read/write and
+    **creates** a missing path, which quietly turned every read-shaped caller
+    into a writer: ``backup_to`` on a typo'd source manufactured an empty
+    database and then reported a successful backup of it — a backup that copied
+    nothing while reporting success — and ``vacuum`` did the same. Creating the
+    database is ``migrate()``'s job, through SQLAlchemy; nothing reached from
+    here should create one.
     """
+    if not db_path.exists():
+        raise DatabaseFileError(
+            f"there is no database at {db_path}. Run `kvseo init` to create one, or point "
+            f"$KVSEO_DATA_DIR at the directory that holds yours."
+        )
     _reject_non_sqlite_file(db_path)
     conn: sqlite3.Connection = sqlite3.connect(db_path, **kwargs)
     return conn
@@ -357,22 +371,26 @@ def backup_to(db_path: Path, dest: Path) -> None:
             _reject_unusable_file(db_path, exc)
             _reject_busy(exc, needs="the backup copy")
             raise
+        # Not _connect(): the destination is the one path here we are *meant*
+        # to create.
         try:
             target = sqlite3.connect(dest)
-            # BEGIN IMMEDIATE proves the destination is writable and unlocked
-            # before the copy starts; it acquires the write lock and reads the
-            # header without modifying a byte.
-            target.execute("BEGIN IMMEDIATE")
-            target.execute("ROLLBACK")
         except sqlite3.Error as exc:
-            _reject_busy(exc, needs="the backup copy")
             raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
-        try:
-            source.backup(target)
-        except sqlite3.Error as exc:
-            _blame_backup_side(db_path, dest, source, exc)
-        finally:
-            target.close()
+        with closing(target):
+            try:
+                # BEGIN IMMEDIATE proves the destination is writable and
+                # unlocked before the copy starts; it takes the write lock and
+                # reads the header without modifying a byte.
+                target.execute("BEGIN IMMEDIATE")
+                target.execute("ROLLBACK")
+            except sqlite3.Error as exc:
+                _reject_busy(exc, needs="the backup copy")
+                raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
+            try:
+                source.backup(target)
+            except sqlite3.Error as exc:
+                _blame_backup_side(db_path, dest, source, exc)
     except BaseException:
         _remove_backup_artifacts(dest, spare_dest=dest_preexisted)
         raise

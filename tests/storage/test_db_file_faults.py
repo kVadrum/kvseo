@@ -30,6 +30,7 @@ from kvseo.storage.db import (
     get_engine,
     migrate,
     stored_revision,
+    vacuum,
 )
 
 runner = CliRunner()
@@ -211,8 +212,6 @@ def test_backup_to_blames_the_destination_when_the_copy_writes_to_garbage(tmp_pa
     migrate(source)
     dest = tmp_path / "precious-notes.txt"
     dest.write_text("the user's precious notes", encoding="utf-8")
-    sidecar = tmp_path / "precious-notes.txt-wal"
-    sidecar.write_bytes(b"recovery data that exists independently of this call")
 
     with pytest.raises(DatabaseFileError) as exc:
         backup_to(source, dest)
@@ -221,11 +220,15 @@ def test_backup_to_blames_the_destination_when_the_copy_writes_to_garbage(tmp_pa
     assert str(dest) in message
     assert str(source) not in message, "blaming the source tells the user to delete a healthy database"
     assert "re-run `kvseo init`" not in message
-    # The failure cleanup must not take the user's files with it: dest existed
-    # before the call, so nothing at that path is ours to remove — a
-    # pre-existing -wal is recovery data, not our scratch.
+    # The failure cleanup must not take the user's file with it: dest existed
+    # before the call, so it is not ours to remove.
     assert dest.read_text(encoding="utf-8") == "the user's precious notes"
-    assert sidecar.exists(), "cleanup deleted a pre-existing sidecar it never created"
+    # No sidecar assertion here: SQLite deletes a *stray* -wal sitting next to a
+    # non-database when it closes the handle (measured), so that outcome is not
+    # ours to control on this fixture. Our half of the contract — never unlink a
+    # pre-existing destination's sidecars, which for a real database would
+    # destroy WAL-resident data — is pinned in
+    # test_remove_backup_artifacts_removes_only_what_the_copy_created.
 
 
 def _magic_over_broken_header(path: Path) -> Path:
@@ -287,6 +290,7 @@ def test_backup_to_blames_the_destination_when_it_is_a_truncated_database(tmp_pa
     assert "could not write the backup" in message
     assert str(source) not in message, "blaming the source tells the user to delete a healthy database"
     assert "re-run `kvseo init`" not in message
+    assert dest.exists(), "cleanup removed a destination that predates the call"
 
 
 def test_backup_to_reports_contention_instead_of_hanging(tmp_path: Path) -> None:
@@ -359,6 +363,73 @@ def test_blame_backup_side_probe_decides_the_side(tmp_path: Path) -> None:
         conn.close()
     assert str(broken) in str(exc.value), "a source that cannot answer reads is the side to name"
     assert "could not write the backup" not in str(exc.value)
+
+
+def test_backup_to_refuses_a_missing_source_instead_of_creating_one(tmp_path: Path) -> None:
+    """A read must not manufacture the file it was asked to read.
+
+    ``sqlite3.connect`` opens read/write and creates a missing path, so a typo'd
+    source produced an empty database *and* a successful-looking backup of it —
+    a copy of nothing, reported as a copy. The CLI checks existence first, but
+    this is a public storage function and that shield is one caller away from
+    gone (found by the cross-vendor review, 2026-08-06).
+    """
+    missing = tmp_path / "typo-kvseo.db"
+    dest = tmp_path / "backup.db"
+
+    with pytest.raises(DatabaseFileError) as exc:
+        backup_to(missing, dest)
+
+    assert str(missing) in str(exc.value)
+    assert not missing.exists(), "the source path was created by an operation that only reads it"
+    assert not dest.exists(), "a backup of a database that never existed was written"
+
+
+def test_vacuum_refuses_a_missing_database_instead_of_creating_one(tmp_path: Path) -> None:
+    """The same funnel, the same guarantee — vacuum shared the create-on-read bug."""
+    missing = tmp_path / "typo-kvseo.db"
+
+    with pytest.raises(DatabaseFileError):
+        vacuum(missing)
+
+    assert not missing.exists(), "the database path was created by a maintenance command"
+
+
+def test_backup_to_closes_the_destination_when_the_preflight_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed destination pre-flight must not leave its handle open.
+
+    Held open, it blocks the cleanup's ``unlink`` on Windows — leaving behind
+    exactly the partial file the cleanup exists to remove, with the OSError
+    suppressed so nothing reports it. The test keeps its own reference to the
+    connection so refcounting cannot close it on the way out and mask the leak.
+    """
+    source = tmp_path / "kvseo.db"
+    migrate(source)
+    dest = tmp_path / "old-backup.db"
+    migrate(dest)
+    with dest.open("r+b") as fh:
+        fh.truncate(dest.stat().st_size // 3)  # the destination pre-flight fails on this
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(path: object, *args: object, **kwargs: object) -> sqlite3.Connection:
+        conn = real_connect(path, *args, **kwargs)  # type: ignore[arg-type]
+        if str(path) == str(dest):
+            opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracking_connect)
+    with pytest.raises(DatabaseFileError):
+        backup_to(source, dest)
+    monkeypatch.undo()
+
+    assert opened, "the destination was never opened — this test no longer reaches the path"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
 
 
 def test_remove_backup_artifacts_removes_only_what_the_copy_created(tmp_path: Path) -> None:
