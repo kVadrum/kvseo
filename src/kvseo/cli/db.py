@@ -12,7 +12,6 @@ that wants its own retention semantics and tests rather than a ride-along.
 
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -36,7 +35,7 @@ def migrate() -> None:
     db_path = paths.db_path()
     try:
         before = storage.stored_revision(db_path)
-    except storage.DatabaseFileError as exc:
+    except storage.StorageRefusal as exc:
         fail_on_storage_refusal(exc)
 
     # open_db() is the migration: it carries both the upgrade and the exit-3
@@ -67,7 +66,7 @@ def backup(
     # refuse, a database too new for this build must still be backed up.
     try:
         revision = storage.stored_revision(db_path)
-    except storage.DatabaseFileError as exc:
+    except storage.StorageRefusal as exc:
         fail_on_storage_refusal(exc)
 
     # An explicit --output is a path the user chose, so a collision there is
@@ -89,8 +88,7 @@ def backup(
 
     try:
         storage.backup_to(db_path, dest)
-    except (storage.DatabaseBusyError, storage.DatabaseFileError) as exc:
-        _remove_partial_backup(dest)
+    except storage.StorageRefusal as exc:
         fail_on_storage_refusal(exc)
 
     typer.echo(f"backed up database (schema {revision or 'unversioned'}) → {dest} ({_size(dest)})")
@@ -104,12 +102,12 @@ def vacuum() -> None:
     # schema guard rather than rebuilding a database this build can't describe.
     open_db().dispose()
 
-    before = _footprint(db_path)
+    before = storage.disk_footprint(db_path)
     try:
         landed = storage.vacuum(db_path)
-    except (storage.DatabaseBusyError, storage.DatabaseFileError) as exc:
+    except storage.StorageRefusal as exc:
         fail_on_storage_refusal(exc)
-    after = _footprint(db_path)
+    after = storage.disk_footprint(db_path)
 
     if not landed:
         # The rebuild is committed; it just cannot be folded into the main file
@@ -127,22 +125,6 @@ def vacuum() -> None:
         typer.echo(f"vacuumed database: {_bytes(before)} → {_bytes(after)} ({_bytes(reclaimed)} reclaimed)")
     else:
         typer.echo(f"vacuumed database: {_bytes(after)}, nothing to reclaim")
-
-
-def _remove_partial_backup(dest: Path) -> None:
-    """Best-effort cleanup of a backup that failed part-way.
-
-    Sidecars included: the target opens as a fresh database in rollback-journal
-    mode, so a failed copy can leave a ``-journal`` (or ``-wal``) with no
-    matching ``.db`` in the directory the user is told to trust for restores.
-
-    Best-effort because ``unlink`` needs write permission on the destination
-    directory, and not having it is one of the reasons the backup failed — a
-    cleanup that raises would replace the real error with a worse one.
-    """
-    for path in (dest, dest.with_name(dest.name + "-journal"), dest.with_name(dest.name + "-wal")):
-        with suppress(OSError):
-            path.unlink(missing_ok=True)
 
 
 def _free_default_path(backups_dir: Path) -> Path:
@@ -166,21 +148,6 @@ def _free_default_path(backups_dir: Path) -> Path:
         dest = backups_dir / f"kvseo-{stamp}-{nth}.db"
         nth += 1
     return dest
-
-
-def _footprint(db_path: Path) -> int:
-    """Bytes the database occupies on disk: the main file plus its WAL sidecar.
-
-    Measuring the main file alone under-reports. While another connection is
-    attached the WAL cannot be folded in, so freed pages sit there and a real
-    reclaim of megabytes reads as "nothing to reclaim" — the same class of
-    dishonest report this command has already produced once by another route.
-    """
-    total = db_path.stat().st_size
-    wal = db_path.with_name(db_path.name + "-wal")
-    if wal.exists():
-        total += wal.stat().st_size
-    return total
 
 
 def _size(path: Path) -> str:

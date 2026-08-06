@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 from alembic import command
@@ -22,21 +23,12 @@ EXPECTED_TABLES = {
 }
 
 
-def _tables(db: Path) -> set[str]:
-    conn = sqlite3.connect(db)
-    try:
-        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        return {r[0] for r in rows}
-    finally:
-        conn.close()
-
-
-def test_migrate_creates_all_tables(tmp_path: Path) -> None:
+def test_migrate_creates_all_tables(tmp_path: Path, tables: Callable[[Path], set[str]]) -> None:
     db = tmp_path / "kvseo.db"
     migrate(db)
-    tables = _tables(db)
-    assert tables >= EXPECTED_TABLES
-    assert "alembic_version" in tables
+    inventory = tables(db)
+    assert inventory >= EXPECTED_TABLES
+    assert "alembic_version" in inventory
 
 
 def test_migrate_sets_wal(tmp_path: Path) -> None:
@@ -50,22 +42,22 @@ def test_migrate_sets_wal(tmp_path: Path) -> None:
     assert mode.lower() == "wal"
 
 
-def test_migrate_is_idempotent(tmp_path: Path) -> None:
+def test_migrate_is_idempotent(tmp_path: Path, tables: Callable[[Path], set[str]]) -> None:
     db = tmp_path / "kvseo.db"
     migrate(db)
     migrate(db)  # second run must not error
-    assert _tables(db) >= EXPECTED_TABLES
+    assert tables(db) >= EXPECTED_TABLES
 
 
-def test_full_upgrade_downgrade_cycle(tmp_path: Path) -> None:
+def test_full_upgrade_downgrade_cycle(tmp_path: Path, tables: Callable[[Path], set[str]]) -> None:
     db = tmp_path / "kvseo.db"
     cfg = _alembic_config(db)
     command.upgrade(cfg, "head")
-    assert _tables(db) >= EXPECTED_TABLES
+    assert tables(db) >= EXPECTED_TABLES
     command.downgrade(cfg, "base")
-    assert not (EXPECTED_TABLES & _tables(db))  # all domain tables dropped
+    assert not (EXPECTED_TABLES & tables(db))  # all domain tables dropped
     command.upgrade(cfg, "head")  # re-upgrade is clean
-    assert _tables(db) >= EXPECTED_TABLES
+    assert tables(db) >= EXPECTED_TABLES
 
 
 def test_models_match_migrations(tmp_path: Path) -> None:

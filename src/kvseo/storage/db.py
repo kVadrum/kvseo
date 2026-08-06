@@ -10,6 +10,7 @@ database's ``alembic_version`` always reflects a known migration.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,15 +34,25 @@ KNOWN_REVISIONS = ("0001",)
 HEAD_REVISION = KNOWN_REVISIONS[-1]
 
 
-class SchemaVersionError(RuntimeError):
+class StorageRefusal(RuntimeError):
+    """Base for every refusal this layer raises in place of a raw driver error.
+
+    The CLI catches this one name and maps the concrete type to an exit code
+    (``fail_on_storage_refusal``). New refusal types must subclass it — a type
+    that does not is invisible to every catch site and regresses to the raw
+    traceback two of the existing types were introduced to remove.
+    """
+
+
+class SchemaVersionError(StorageRefusal):
     """The database was written by a newer kvseo than the one running."""
 
 
-class DatabaseFileError(RuntimeError):
+class DatabaseFileError(StorageRefusal):
     """The path configured for the database does not hold a usable one."""
 
 
-class DatabaseBusyError(RuntimeError):
+class DatabaseBusyError(StorageRefusal):
     """Another connection holds a lock this operation needs to proceed."""
 
 
@@ -164,6 +175,19 @@ def _reject_non_sqlite_file(db_path: Path) -> None:
         raise DatabaseFileError(_not_a_database_message(db_path, "no SQLite file header"))
 
 
+def _connect(db_path: Path, **kwargs: Any) -> sqlite3.Connection:
+    """``sqlite3.connect`` with the header guard applied first.
+
+    The one funnel for stdlib opens, so "no connection touches the file before
+    the header check" is a property of opening it — not of call ordering in the
+    CLI, which is where the guarantee lived while ``vacuum()`` relied on its
+    caller having probed the file already.
+    """
+    _reject_non_sqlite_file(db_path)
+    conn: sqlite3.Connection = sqlite3.connect(db_path, **kwargs)
+    return conn
+
+
 def _register_sqlite_pragmas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
@@ -248,9 +272,8 @@ def stored_revision(db_path: Path) -> str | None:
     """
     if not db_path.exists():
         return None
-    _reject_non_sqlite_file(db_path)
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _connect(db_path)
     except sqlite3.Error as exc:
         _reject_unusable_file(db_path, exc)
         return None
@@ -307,15 +330,20 @@ def backup_to(db_path: Path, dest: Path) -> None:
     Getting this backwards is worse than saying nothing: the previous version
     told a user whose *destination* was a stray text file to delete their live
     database.
+
+    A failed copy cleans up after itself — whatever it created at ``dest``
+    (partial file, sidecars) is removed before the error propagates, so no
+    caller has to know what a half-written backup looks like. A ``dest`` that
+    existed before the call is the user's and is left alone.
     """
-    _reject_non_sqlite_file(db_path)
     try:
-        source = sqlite3.connect(db_path)
+        source = _connect(db_path)
     except sqlite3.Error as exc:
         # Eager failure here means the source path is not openable at all — a
         # directory, say. The lazy-connect reasoning below does not cover it.
         _reject_unusable_file(db_path, exc)
         raise
+    dest_preexisted = dest.exists()
     try:
         try:
             target = sqlite3.connect(dest)
@@ -331,8 +359,34 @@ def backup_to(db_path: Path, dest: Path) -> None:
             raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
         finally:
             target.close()
+    except BaseException:
+        _remove_backup_artifacts(dest, spare_dest=dest_preexisted)
+        raise
     finally:
         source.close()
+
+
+def _remove_backup_artifacts(dest: Path, *, spare_dest: bool) -> None:
+    """Best-effort removal of what a failed copy left at the destination.
+
+    ``spare_dest`` keeps ``dest`` itself when it existed before the copy began —
+    a pre-existing file is the user's, not ours, and the failure mode that
+    reaches one (an existing non-database opens lazily and fails on first write)
+    leaves its content intact. The sidecars are always ours: the target opens as
+    a fresh database in rollback-journal mode, so a failed copy can leave a
+    ``-journal`` (or ``-wal``) with no matching backup in the directory the user
+    is told to trust for restores.
+
+    Best-effort because ``unlink`` needs write permission on the destination
+    directory, and not having it is one of the reasons the copy failed — a
+    cleanup that raises would replace the real error with a worse one.
+    """
+    doomed = [dest.with_name(dest.name + "-journal"), dest.with_name(dest.name + "-wal")]
+    if not spare_dest:
+        doomed.insert(0, dest)
+    for path in doomed:
+        with suppress(OSError):
+            path.unlink()
 
 
 def _backup_dest_message(dest: Path, exc: BaseException) -> str:
@@ -355,11 +409,30 @@ def _checkpoint(conn: sqlite3.Connection) -> bool:
     return not busy
 
 
+def disk_footprint(db_path: Path) -> int:
+    """Bytes the database occupies on disk: the main file plus its WAL sidecar.
+
+    Measuring the main file alone under-reports. While another connection is
+    attached the WAL cannot be folded in, so freed pages sit there and a real
+    reclaim of megabytes reads as "nothing to reclaim" — the same class of
+    dishonest report ``kvseo db vacuum`` has already produced once by another
+    route.
+    """
+    total = db_path.stat().st_size
+    wal = db_path.with_name(db_path.name + "-wal")
+    if wal.exists():
+        total += wal.stat().st_size
+    return total
+
+
 def vacuum(db_path: Path) -> bool:
     """Rebuild the database, reclaiming free pages (06 §4.10.3).
 
     ``isolation_level=None`` because VACUUM cannot run inside a transaction and
-    stdlib sqlite3 otherwise opens one implicitly.
+    stdlib sqlite3 otherwise opens one implicitly. Opening goes through
+    ``_connect``, so a path that holds no database raises ``DatabaseFileError``
+    here before VACUUM can initialise over it — a direct call is as safe as the
+    CLI path, which probes the file first anyway.
 
     Returns True when the reclaimed space is already visible in the main file,
     and False when the rebuild is committed but still sitting in the WAL because
@@ -377,7 +450,7 @@ def vacuum(db_path: Path) -> bool:
     Raises ``DatabaseBusyError`` only when VACUUM itself cannot run, which is a
     genuine failure: nothing was rebuilt and retrying is the fix.
     """
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn = _connect(db_path, isolation_level=None)
     try:
         # Best-effort, so the caller's "before" measurement sees a folded-in
         # file. Blocked here is not interesting; the one after VACUUM is.

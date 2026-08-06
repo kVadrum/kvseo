@@ -11,6 +11,7 @@ genuine migration failure keep the behaviour they had.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -105,17 +106,14 @@ def test_migrate_refuses_a_file_that_is_not_a_database(tmp_path: Path) -> None:
 # --- What must NOT be treated as a file fault ------------------------------
 
 
-def test_unmigrated_database_still_reads_as_none(tmp_path: Path) -> None:
+def test_unmigrated_database_still_reads_as_none(tmp_path: Path, unversioned_db: Callable[[Path], Path]) -> None:
     """The regression that matters: a valid file without our tables is fine.
 
     SQLITE_ERROR ("no such table") shares the DatabaseError family with the
     faults above. Reading it as a fault would make every fresh `kvseo init`
     exit 3.
     """
-    db = tmp_path / "fresh.db"
-    engine = get_engine(db)
-    engine.connect().close()
-    engine.dispose()
+    db = unversioned_db(tmp_path / "fresh.db")
 
     assert stored_revision(db) is None
     check_schema_version(db)  # must not raise
@@ -220,6 +218,9 @@ def test_backup_to_blames_the_destination_when_the_copy_writes_to_garbage(tmp_pa
     assert str(dest) in message
     assert str(source) not in message, "blaming the source tells the user to delete a healthy database"
     assert "re-run `kvseo init`" not in message
+    # The failure cleanup must not take the user's file with it: dest existed
+    # before the call, so it is not ours to remove.
+    assert dest.read_text(encoding="utf-8") == "the user's precious notes"
 
 
 def test_backup_to_blames_the_source_when_the_copy_reads_garbage(tmp_path: Path) -> None:
@@ -241,12 +242,34 @@ def test_backup_to_blames_the_source_when_the_copy_reads_garbage(tmp_path: Path)
     assert "could not write the backup" not in message
 
 
+def test_backup_to_removes_its_partial_output_when_the_copy_fails(tmp_path: Path) -> None:
+    """A failed copy must not leave a fresh partial file where restores live.
+
+    The provocation is a *truncated* source, not ``_corrupt_database``: the
+    backup API is a page-level copy that never walks the btree, so trashed page
+    content copies without complaint (measured) — but pages missing entirely
+    surface as SQLITE_CORRUPT mid-copy, after the destination file exists. The
+    destination did not exist before the call, so whatever the failure left
+    there — partial file, sidecars — is ours and gets removed before the error
+    propagates. A destination that predates the call is the user's and stays
+    (the precious-notes test above pins that side).
+    """
+    source = tmp_path / "kvseo.db"
+    migrate(source)
+    with source.open("r+b") as fh:
+        fh.truncate(source.stat().st_size // 3)
+    dest = tmp_path / "backup.db"
+
+    with pytest.raises(DatabaseFileError):
+        backup_to(source, dest)
+
+    assert list(tmp_path.glob("backup.db*")) == [], "a failed backup left artifacts behind"
+
+
 # --- Sub-header-size files: SQLite would initialise over them ---------------
 
 
-def test_a_one_byte_file_is_refused_and_left_intact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_one_byte_file_is_refused_and_left_intact(bare_data_dir: Path) -> None:
     """SQLite treats a tiny file as an empty database and writes over it.
 
     Measured before the header check: a 1-byte file at the database path was
@@ -254,11 +277,7 @@ def test_a_one_byte_file_is_refused_and_left_intact(
     user owns. 50 bytes and up already failed with SQLITE_NOTADB, so the gap was
     only below SQLite's own header threshold.
     """
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-    stray = data_dir / "kvseo.db"
+    stray = bare_data_dir / "kvseo.db"
     stray.write_bytes(b"x")
 
     result = runner.invoke(app, ["init"])
@@ -282,14 +301,8 @@ def test_a_zero_byte_file_is_still_treated_as_a_new_database(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("command", [["init"], ["cost"], ["db", "migrate"], ["db", "backup"], ["db", "vacuum"]])
-def test_cli_exits_3_on_a_file_that_is_not_a_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
-) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-    _not_a_database(data_dir / "kvseo.db")
+def test_cli_exits_3_on_a_file_that_is_not_a_database(bare_data_dir: Path, command: list[str]) -> None:
+    _not_a_database(bare_data_dir / "kvseo.db")
 
     result = runner.invoke(app, command)
 
@@ -297,15 +310,9 @@ def test_cli_exits_3_on_a_file_that_is_not_a_database(
     assert "not a usable kvseo database" in result.output
 
 
-def test_version_and_help_survive_a_file_that_is_not_a_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_version_and_help_survive_a_file_that_is_not_a_database(bare_data_dir: Path) -> None:
     """The refusal gates database work, not the whole CLI (as for the schema pin)."""
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-    _not_a_database(data_dir / "kvseo.db")
+    _not_a_database(bare_data_dir / "kvseo.db")
 
     assert runner.invoke(app, ["--version"]).exit_code == 0
     assert runner.invoke(app, ["--help"]).exit_code == 0

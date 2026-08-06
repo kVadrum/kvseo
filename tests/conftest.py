@@ -129,5 +129,19 @@ def audit_engine(tmp_path: Path) -> Engine:
 
 
 @pytest.fixture
+def bare_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A configured but empty kvseo data directory — no ``init`` has run.
+
+    Both env halves matter: ``KVSEO_DATA_DIR`` alone leaves config reads and
+    writes leaking into the real user config tree.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
+    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
+    return data
+
+
+@pytest.fixture
 def seed() -> Callable[..., uuid.UUID]:
     return seed_audit

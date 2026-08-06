@@ -12,43 +12,35 @@ import os
 import re
 import sqlite3
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
 from typer.testing import CliRunner
 
 from kvseo.cli import app
 from kvseo.cli import db as cli_db
-from kvseo.storage.db import HEAD_REVISION, get_engine, stored_revision
+from kvseo.storage.db import HEAD_REVISION, stored_revision
 
 runner = CliRunner()
 
 
 @pytest.fixture
-def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def data_dir(bare_data_dir: Path) -> Path:
     """A configured, initialised kvseo data directory."""
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
     assert runner.invoke(app, ["init"]).exit_code == 0
-    return data
+    return bare_data_dir
 
 
-def _set_revision(db: Path, revision: str) -> None:
-    engine = get_engine(db)
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE alembic_version SET version_num = :r"), {"r": revision})
-    engine.dispose()
+def _fill_bulk(conn: sqlite3.Connection, rows: int) -> None:
+    """Bulk rows whose later DROP leaves reclaimable free pages behind.
 
-
-def _tables(db: Path) -> set[str]:
-    conn = sqlite3.connect(db)
-    try:
-        return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    finally:
-        conn.close()
+    The payload width is what guarantees the size thresholds the vacuum tests
+    assert against; checkpoint placement stays with each test — it is
+    load-bearing and deliberately different per scenario.
+    """
+    conn.execute("CREATE TABLE bulk (blob TEXT)")
+    conn.executemany("INSERT INTO bulk VALUES (?)", [("x" * 2000,) for _ in range(rows)])
 
 
 # --- db migrate ------------------------------------------------------------
@@ -63,17 +55,10 @@ def test_migrate_reports_an_already_current_database(data_dir: Path) -> None:
 
 
 def test_migrate_brings_an_unmigrated_database_to_head(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    bare_data_dir: Path, unversioned_db: Callable[[Path], Path], tables: Callable[[Path], set[str]]
 ) -> None:
     """A valid SQLite file with none of our tables is the "unversioned" case."""
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-    db = data / "kvseo.db"
-    engine = get_engine(db)
-    engine.connect().close()
-    engine.dispose()
+    db = unversioned_db(bare_data_dir / "kvseo.db")
     assert stored_revision(db) is None
 
     result = runner.invoke(app, ["db", "migrate"])
@@ -81,12 +66,14 @@ def test_migrate_brings_an_unmigrated_database_to_head(
     assert result.exit_code == 0, result.output
     assert "(unversioned)" in result.output and HEAD_REVISION in result.output
     assert stored_revision(db) == HEAD_REVISION
-    assert "audit_runs" in _tables(db)
+    assert "audit_runs" in tables(db)
 
 
-def test_migrate_refuses_a_database_newer_than_the_package(data_dir: Path) -> None:
+def test_migrate_refuses_a_database_newer_than_the_package(
+    data_dir: Path, set_revision: Callable[[Path, str], None]
+) -> None:
     """07 §4's pin still applies — migrating forward cannot fix an ahead database."""
-    _set_revision(data_dir / "kvseo.db", "9999")
+    set_revision(data_dir / "kvseo.db", "9999")
 
     result = runner.invoke(app, ["db", "migrate"])
 
@@ -109,13 +96,13 @@ def test_backup_writes_a_timestamped_copy(data_dir: Path) -> None:
     assert str(backups[0]) in result.output
 
 
-def test_backup_copy_is_a_usable_database(data_dir: Path) -> None:
+def test_backup_copy_is_a_usable_database(data_dir: Path, tables: Callable[[Path], set[str]]) -> None:
     """A backup nobody can read is not a backup — check the schema came across."""
     assert runner.invoke(app, ["db", "backup"]).exit_code == 0
 
     copy = next((data_dir / "backups").glob("kvseo-*.db"))
     assert stored_revision(copy) == HEAD_REVISION
-    assert "audit_runs" in _tables(copy)
+    assert "audit_runs" in tables(copy)
 
 
 def test_backup_honours_output(data_dir: Path, tmp_path: Path) -> None:
@@ -201,18 +188,9 @@ def test_backup_output_under_a_regular_file_is_a_usage_error(data_dir: Path, tmp
     assert not_a_dir.read_text(encoding="utf-8") == "this is a file, not a directory"
 
 
-def test_backup_does_not_migrate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_backup_does_not_migrate(bare_data_dir: Path, unversioned_db: Callable[[Path], Path]) -> None:
     """07 §5: the copy is of the file as it stands, not of a file we changed first."""
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-    db = data / "kvseo.db"
-    engine = get_engine(db)
-    engine.connect().close()
-    engine.dispose()
+    db = unversioned_db(bare_data_dir / "kvseo.db")
 
     result = runner.invoke(app, ["db", "backup"])
 
@@ -221,9 +199,11 @@ def test_backup_does_not_migrate(
     assert stored_revision(db) is None, "backup migrated the source database"
 
 
-def test_backup_works_on_a_database_newer_than_the_package(data_dir: Path) -> None:
+def test_backup_works_on_a_database_newer_than_the_package(
+    data_dir: Path, set_revision: Callable[[Path, str], None]
+) -> None:
     """The one case where a copy matters most must not be the one that refuses."""
-    _set_revision(data_dir / "kvseo.db", "9999")
+    set_revision(data_dir / "kvseo.db", "9999")
 
     result = runner.invoke(app, ["db", "backup"])
 
@@ -233,14 +213,7 @@ def test_backup_works_on_a_database_newer_than_the_package(data_dir: Path) -> No
     assert stored_revision(copy) == "9999"
 
 
-def test_backup_without_a_database_exits_3(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-
+def test_backup_without_a_database_exits_3(bare_data_dir: Path) -> None:
     result = runner.invoke(app, ["db", "backup"])
 
     assert result.exit_code == 3
@@ -250,14 +223,14 @@ def test_backup_without_a_database_exits_3(
 # --- db vacuum -------------------------------------------------------------
 
 
-def test_vacuum_succeeds_and_preserves_the_schema(data_dir: Path) -> None:
+def test_vacuum_succeeds_and_preserves_the_schema(data_dir: Path, tables: Callable[[Path], set[str]]) -> None:
     result = runner.invoke(app, ["db", "vacuum"])
 
     assert result.exit_code == 0, result.output
     assert "vacuumed database" in result.output
     db = data_dir / "kvseo.db"
     assert stored_revision(db) == HEAD_REVISION
-    assert "audit_runs" in _tables(db)
+    assert "audit_runs" in tables(db)
 
 
 def test_vacuum_reclaims_space_after_a_delete(data_dir: Path) -> None:
@@ -265,8 +238,7 @@ def test_vacuum_reclaims_space_after_a_delete(data_dir: Path) -> None:
     db = data_dir / "kvseo.db"
     conn = sqlite3.connect(db, isolation_level=None)
     try:
-        conn.execute("CREATE TABLE bulk (blob TEXT)")
-        conn.executemany("INSERT INTO bulk VALUES (?)", [("x" * 2000,) for _ in range(2000)])
+        _fill_bulk(conn, 2000)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("DROP TABLE bulk")
     finally:
@@ -334,8 +306,7 @@ def test_vacuum_under_a_reader_succeeds_with_a_deferred_reclaim(data_dir: Path) 
     """
     db = data_dir / "kvseo.db"
     writer = sqlite3.connect(db, isolation_level=None)
-    writer.execute("CREATE TABLE bulk (blob TEXT)")
-    writer.executemany("INSERT INTO bulk VALUES (?)", [("x" * 2000,) for _ in range(1500)])
+    _fill_bulk(writer, 1500)
     writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     writer.execute("DROP TABLE bulk")
     writer.close()
@@ -378,8 +349,7 @@ def test_vacuum_counts_wal_resident_space_in_its_report(data_dir: Path) -> None:
     writer = sqlite3.connect(db, isolation_level=None)
     try:
         writer.execute("PRAGMA wal_autocheckpoint=0")
-        writer.execute("CREATE TABLE bulk (blob TEXT)")
-        writer.executemany("INSERT INTO bulk VALUES (?)", [("x" * 2000,) for _ in range(1500)])
+        _fill_bulk(writer, 1500)
         writer.execute("DROP TABLE bulk")
         wal = db.with_name(db.name + "-wal")
         assert wal.exists() and wal.stat().st_size > 1_000_000, "setup failed to leave space in the WAL"
@@ -393,9 +363,11 @@ def test_vacuum_counts_wal_resident_space_in_its_report(data_dir: Path) -> None:
     assert "reclaimed" in result.output
 
 
-def test_vacuum_refuses_a_database_newer_than_the_package(data_dir: Path) -> None:
+def test_vacuum_refuses_a_database_newer_than_the_package(
+    data_dir: Path, set_revision: Callable[[Path, str], None]
+) -> None:
     """Don't rebuild a file written to a schema this build cannot describe."""
-    _set_revision(data_dir / "kvseo.db", "9999")
+    set_revision(data_dir / "kvseo.db", "9999")
 
     result = runner.invoke(app, ["db", "vacuum"])
 
@@ -408,7 +380,7 @@ def test_vacuum_refuses_a_database_newer_than_the_package(data_dir: Path) -> Non
 
 @pytest.mark.parametrize("command", [["init"], ["db", "migrate"], ["cost"]])
 def test_pending_migrations_under_a_writer_report_instead_of_raising(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
+    bare_data_dir: Path, command: list[str]
 ) -> None:
     """Contention needs BOTH a writer and migrations actually pending.
 
@@ -419,11 +391,7 @@ def test_pending_migrations_under_a_writer_report_instead_of_raising(
     triggers: a first `init` over a pre-existing unversioned file, and the
     migrate-on-open after any upgrade that ships a migration.
     """
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-    db = data / "kvseo.db"
+    db = bare_data_dir / "kvseo.db"
     # A valid SQLite file with no alembic_version — migrate has real DDL to run.
     seed = sqlite3.connect(db)
     seed.execute("CREATE TABLE decoy (x)")

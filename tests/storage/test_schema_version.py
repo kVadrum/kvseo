@@ -7,10 +7,10 @@ reaches a user as an error.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
 from typer.testing import CliRunner
 
 from kvseo.cli import app
@@ -19,19 +19,11 @@ from kvseo.storage.db import (
     KNOWN_REVISIONS,
     SchemaVersionError,
     check_schema_version,
-    get_engine,
     migrate,
     stored_revision,
 )
 
 runner = CliRunner()
-
-
-def _set_revision(db: Path, revision: str) -> None:
-    engine = get_engine(db)
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE alembic_version SET version_num = :r"), {"r": revision})
-    engine.dispose()
 
 
 def test_known_revisions_match_alembic(tmp_path: Path) -> None:
@@ -65,21 +57,20 @@ def test_absent_database_is_not_a_mismatch(tmp_path: Path) -> None:
     check_schema_version(missing)  # must not raise
 
 
-def test_database_without_alembic_version_table(tmp_path: Path) -> None:
+def test_database_without_alembic_version_table(
+    tmp_path: Path, unversioned_db: Callable[[Path], Path]
+) -> None:
     """A stray/empty SQLite file reads as unmigrated, not as a mismatch."""
-    db = tmp_path / "empty.db"
-    engine = get_engine(db)
-    engine.connect().close()
-    engine.dispose()
+    db = unversioned_db(tmp_path / "empty.db")
 
     assert stored_revision(db) is None
     check_schema_version(db)  # must not raise
 
 
-def test_newer_database_is_refused(tmp_path: Path) -> None:
+def test_newer_database_is_refused(tmp_path: Path, set_revision: Callable[[Path, str], None]) -> None:
     db = tmp_path / "kvseo.db"
     migrate(db)
-    _set_revision(db, "9999")
+    set_revision(db, "9999")
 
     with pytest.raises(SchemaVersionError) as exc:
         check_schema_version(db)
@@ -88,28 +79,23 @@ def test_newer_database_is_refused(tmp_path: Path) -> None:
     assert "pip install -U kvseo" in message
 
 
-def test_migrate_refuses_a_newer_database(tmp_path: Path) -> None:
+def test_migrate_refuses_a_newer_database(tmp_path: Path, set_revision: Callable[[Path, str], None]) -> None:
     """The guard sits in migrate(), so `kvseo init` is covered too — otherwise
     Alembic raises its own 'can't locate revision' error instead."""
     db = tmp_path / "kvseo.db"
     migrate(db)
-    _set_revision(db, "9999")
+    set_revision(db, "9999")
 
     with pytest.raises(SchemaVersionError):
         migrate(db)
 
 
 def test_cli_exits_3_on_newer_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    bare_data_dir: Path, set_revision: Callable[[Path, str], None]
 ) -> None:
     """06 §2: configuration error, not a traceback and not a usage error."""
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-
     assert runner.invoke(app, ["init"]).exit_code == 0
-    _set_revision(data_dir / "kvseo.db", "9999")
+    set_revision(bare_data_dir / "kvseo.db", "9999")
 
     result = runner.invoke(app, ["cost"])
     assert result.exit_code == 3
@@ -120,17 +106,12 @@ def test_cli_exits_3_on_newer_database(
 
 
 def test_version_and_help_survive_an_unusable_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    bare_data_dir: Path, set_revision: Callable[[Path, str], None]
 ) -> None:
     """The guard gates database work, not the whole CLI — a user with a broken
     database must still be able to see what version they are running."""
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    monkeypatch.setenv("KVSEO_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("KVSEO_CONFIG_DIR", str(tmp_path / "cfg"))
-
     assert runner.invoke(app, ["init"]).exit_code == 0
-    _set_revision(data_dir / "kvseo.db", "9999")
+    set_revision(bare_data_dir / "kvseo.db", "9999")
 
     assert runner.invoke(app, ["--version"]).exit_code == 0
     assert runner.invoke(app, ["--help"]).exit_code == 0

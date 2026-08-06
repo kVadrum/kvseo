@@ -13,7 +13,7 @@ from typing import NoReturn
 import typer
 from sqlalchemy.engine import Engine
 
-from kvseo.storage.db import DatabaseBusyError, DatabaseFileError, SchemaVersionError, open_engine
+from kvseo.storage.db import DatabaseBusyError, StorageRefusal, open_engine
 
 
 def fail(message: str, *, code: int) -> NoReturn:
@@ -31,14 +31,14 @@ def open_db() -> Engine:
     """
     try:
         return open_engine()
-    except (DatabaseBusyError, DatabaseFileError, SchemaVersionError) as exc:
+    except StorageRefusal as exc:
         fail_on_storage_refusal(exc)
 
 
-def fail_on_storage_refusal(exc: DatabaseBusyError | DatabaseFileError | SchemaVersionError) -> NoReturn:
+def fail_on_storage_refusal(exc: StorageRefusal) -> NoReturn:
     """Map a storage-layer refusal to its exit code — the CLI's half of 06 §2.
 
-    **3** for the two fatal refusals: the environment is wrong, not the
+    **3** for the fatal refusals: the environment is wrong, not the
     invocation, so not exit 2. ``SchemaVersionError`` means the package and the
     database disagree; ``DatabaseFileError`` means the path holds no usable
     database at all.
