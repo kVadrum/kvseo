@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 from kvseo.cli import app
 from kvseo.storage.db import (
     HEAD_REVISION,
+    DatabaseBusyError,
     DatabaseFileError,
     _file_fault_code,
     backup_to,
@@ -210,6 +211,8 @@ def test_backup_to_blames_the_destination_when_the_copy_writes_to_garbage(tmp_pa
     migrate(source)
     dest = tmp_path / "precious-notes.txt"
     dest.write_text("the user's precious notes", encoding="utf-8")
+    sidecar = tmp_path / "precious-notes.txt-wal"
+    sidecar.write_bytes(b"recovery data that exists independently of this call")
 
     with pytest.raises(DatabaseFileError) as exc:
         backup_to(source, dest)
@@ -218,52 +221,168 @@ def test_backup_to_blames_the_destination_when_the_copy_writes_to_garbage(tmp_pa
     assert str(dest) in message
     assert str(source) not in message, "blaming the source tells the user to delete a healthy database"
     assert "re-run `kvseo init`" not in message
-    # The failure cleanup must not take the user's file with it: dest existed
-    # before the call, so it is not ours to remove.
+    # The failure cleanup must not take the user's files with it: dest existed
+    # before the call, so nothing at that path is ours to remove — a
+    # pre-existing -wal is recovery data, not our scratch.
     assert dest.read_text(encoding="utf-8") == "the user's precious notes"
+    assert sidecar.exists(), "cleanup deleted a pre-existing sidecar it never created"
+
+
+def _magic_over_broken_header(path: Path) -> Path:
+    """A source whose 16-byte magic is intact over a garbage page-size field.
+
+    The shape that indicts code-based side attribution: it passes the magic
+    guard, then raises SQLITE_NOTADB — the code the old handler read as "the
+    destination's" — from the *source*. (An earlier version of this test used a
+    plain text file, which the magic guard rejects before any copy runs; it
+    pinned nothing about the paths it named.)
+    """
+    migrate(path)
+    raw = bytearray(path.read_bytes())
+    raw[16:18] = b"\x00\x07"
+    path.write_bytes(bytes(raw))
+    return path
 
 
 def test_backup_to_blames_the_source_when_the_copy_reads_garbage(tmp_path: Path) -> None:
-    """The mid-copy handler: a bad source only shows up once backup() reads it.
+    """A broken source below the magic must be named as the source's fault.
 
-    ``sqlite3.connect`` is lazy, so opening the source succeeds on any path and
-    the destination opens fine — the failure lands in the copy itself. Called
-    directly rather than through the CLI, which probes the source first and would
-    never let this path run.
+    Reached via the pre-flight read: the magic guard cannot see past byte 15,
+    so this source gets as far as ``backup_to``'s own reads. Called directly
+    rather than through the CLI, which probes the source first and would never
+    let this path run.
     """
-    source = _not_a_database(tmp_path / "kvseo.db")
+    source = _magic_over_broken_header(tmp_path / "kvseo.db")
     dest = tmp_path / "backup.db"
 
     with pytest.raises(DatabaseFileError) as exc:
         backup_to(source, dest)
 
     message = str(exc.value)
-    assert str(source) in message, "the copy failed reading the source, so the source is what to name"
+    assert str(source) in message, "the failure is the source's, so the source is what to name"
     assert "could not write the backup" not in message
 
 
-def test_backup_to_removes_its_partial_output_when_the_copy_fails(tmp_path: Path) -> None:
-    """A failed copy must not leave a fresh partial file where restores live.
+def test_backup_to_blames_the_destination_when_it_is_a_truncated_database(tmp_path: Path) -> None:
+    """A truncated database at the destination must not indict a healthy source.
 
-    The provocation is a *truncated* source, not ``_corrupt_database``: the
-    backup API is a page-level copy that never walks the btree, so trashed page
-    content copies without complaint (measured) — but pages missing entirely
-    surface as SQLITE_CORRUPT mid-copy, after the destination file exists. The
-    destination did not exist before the call, so whatever the failure left
-    there — partial file, sidecars — is ours and gets removed before the error
-    propagates. A destination that predates the call is the user's and stays
-    (the precious-notes test above pins that side).
+    Caught by the destination pre-flight (``BEGIN IMMEDIATE`` reads the header
+    and the size-vs-page-count check fires), which is what makes the
+    attribution positional rather than inferred. Under the old code-based
+    inference this raised SQLITE_CORRUPT — read as "the source's" — and the
+    advice was the destructive one: delete your live database. A truncated
+    destination is exactly what a killed ``cp`` of an earlier backup leaves.
     """
     source = tmp_path / "kvseo.db"
     migrate(source)
-    with source.open("r+b") as fh:
-        fh.truncate(source.stat().st_size // 3)
-    dest = tmp_path / "backup.db"
+    dest = tmp_path / "old-backup.db"
+    migrate(dest)
+    with dest.open("r+b") as fh:
+        fh.truncate(dest.stat().st_size // 3)
 
-    with pytest.raises(DatabaseFileError):
+    with pytest.raises(DatabaseFileError) as exc:
         backup_to(source, dest)
 
-    assert list(tmp_path.glob("backup.db*")) == [], "a failed backup left artifacts behind"
+    message = str(exc.value)
+    assert "could not write the backup" in message
+    assert str(source) not in message, "blaming the source tells the user to delete a healthy database"
+    assert "re-run `kvseo init`" not in message
+
+
+def test_backup_to_reports_contention_instead_of_hanging(tmp_path: Path) -> None:
+    """A lock the copy cannot get must become an error, not a silent hang.
+
+    CPython's ``backup()`` retries a locked database forever — no cap, and the
+    progress callback stays silent while it retries (measured) — so without the
+    pre-flight read this test does not fail, it hangs. Needs a rollback-journal
+    source: WAL gives readers a free pass, which is why `kvseo db backup` works
+    against a live writer (pinned in test_db_commands).
+    """
+    source = tmp_path / "foreign.db"
+    conn = sqlite3.connect(source)
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("CREATE TABLE t (x TEXT)")
+    conn.commit()
+    conn.close()
+
+    hog = sqlite3.connect(source, isolation_level=None)
+    try:
+        hog.execute("BEGIN EXCLUSIVE")
+
+        with pytest.raises(DatabaseBusyError) as exc:
+            backup_to(source, tmp_path / "backup.db")
+    finally:
+        hog.close()
+
+    assert "in use by another process" in str(exc.value)
+
+
+def test_blame_backup_side_probe_decides_the_side(tmp_path: Path) -> None:
+    """The mid-copy attribution helper, pinned directly at both arms.
+
+    No static file shape reaches the mid-copy branch any more — the pre-flight
+    reads catch every enumerable fault before the copy starts (measured:
+    truncation and header damage both die at pre-flight, on either side) — so
+    the handler's remaining scope is the dynamic tail: IO errors, disk-full,
+    corruption arriving mid-copy. Constructed exceptions are the deterministic
+    way in, the same trade ``test_extended_result_codes_are_recognised`` makes.
+
+    The codes are chosen adversarially: the healthy-source case carries
+    SQLITE_CORRUPT (the code the old inference hardwired to the source) and
+    must still blame the destination; the broken-source case carries
+    SQLITE_NOTADB (hardwired to the destination) and must still blame the
+    source. Only the probe, not the code, may decide.
+    """
+    from kvseo.storage.db import _blame_backup_side
+
+    corrupt = sqlite3.DatabaseError("database disk image is malformed")
+    corrupt.sqlite_errorcode = 11  # SQLITE_CORRUPT
+    healthy = tmp_path / "healthy.db"
+    migrate(healthy)
+    conn = sqlite3.connect(healthy)
+    try:
+        with pytest.raises(DatabaseFileError) as exc:
+            _blame_backup_side(healthy, tmp_path / "backup.db", conn, corrupt)
+    finally:
+        conn.close()
+    assert "could not write the backup" in str(exc.value)
+    assert str(healthy) not in str(exc.value), "a source that still answers reads is not the broken side"
+
+    notadb = sqlite3.DatabaseError("file is not a database")
+    notadb.sqlite_errorcode = 26  # SQLITE_NOTADB
+    broken = _magic_over_broken_header(tmp_path / "broken.db")
+    conn = sqlite3.connect(broken)  # lazy: the fault surfaces at the probe's read
+    try:
+        with pytest.raises(DatabaseFileError) as exc:
+            _blame_backup_side(broken, tmp_path / "backup.db", conn, notadb)
+    finally:
+        conn.close()
+    assert str(broken) in str(exc.value), "a source that cannot answer reads is the side to name"
+    assert "could not write the backup" not in str(exc.value)
+
+
+def test_remove_backup_artifacts_removes_only_what_the_copy_created(tmp_path: Path) -> None:
+    """Cleanup semantics, pinned at unit level.
+
+    Like the mid-copy handler above, the removal side is reachable end-to-end
+    only through the dynamic tail (the pre-flights fail before the destination
+    is created for every static fault), so the contract is pinned here: a
+    destination the copy created is removed with its sidecars; a pre-existing
+    destination keeps *everything* — its sidecars are recovery data, not our
+    scratch. The precious-notes test pins the spare side end-to-end.
+    """
+    from kvseo.storage.db import _remove_backup_artifacts
+
+    for name in ("fresh.db", "fresh.db-journal", "fresh.db-wal"):
+        (tmp_path / name).write_bytes(b"partial wreckage")
+    _remove_backup_artifacts(tmp_path / "fresh.db", spare_dest=False)
+    assert list(tmp_path.glob("fresh.db*")) == [], "a created destination must be removed, sidecars included"
+
+    for name in ("kept.db", "kept.db-wal"):
+        (tmp_path / name).write_bytes(b"the user's recovery data")
+    _remove_backup_artifacts(tmp_path / "kept.db", spare_dest=True)
+    kept = sorted(p.name for p in tmp_path.glob("kept.db*"))
+    assert kept == ["kept.db", "kept.db-wal"], "a pre-existing destination owns its sidecars too"
 
 
 # --- Sub-header-size files: SQLite would initialise over them ---------------

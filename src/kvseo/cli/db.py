@@ -107,7 +107,6 @@ def vacuum() -> None:
         landed = storage.vacuum(db_path)
     except storage.StorageRefusal as exc:
         fail_on_storage_refusal(exc)
-    after = storage.disk_footprint(db_path)
 
     if not landed:
         # The rebuild is committed; it just cannot be folded into the main file
@@ -120,6 +119,7 @@ def vacuum() -> None:
         )
         return
 
+    after = storage.disk_footprint(db_path)
     reclaimed = before - after
     if reclaimed > 0:
         typer.echo(f"vacuumed database: {_bytes(before)} → {_bytes(after)} ({_bytes(reclaimed)} reclaimed)")
@@ -155,5 +155,7 @@ def _size(path: Path) -> str:
 
 
 def _bytes(count: int) -> str:
+    if count < 1024:
+        return f"{count} B"  # a sub-KiB reclaim must not print as "0 KiB reclaimed"
     kib = count / 1024
     return f"{kib:.0f} KiB" if kib < 1024 else f"{kib / 1024:.1f} MiB"

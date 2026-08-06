@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -319,22 +319,28 @@ def backup_to(db_path: Path, dest: Path) -> None:
     the two moments you most want a copy are right before an upgrade and right
     after discovering the installed package is too old for it.
 
-    Failures are attributed by side, because the same result code means opposite
-    things at either end of the copy. Opening ``dest`` can only be about
-    ``dest``. The source's header is checked up front, which is what makes the
-    mid-copy branch decidable: after that, SQLITE_NOTADB can only be the
-    destination (an existing non-database file opens lazily and fails on first
-    write), while SQLITE_CORRUPT is the source revealing damage below the header
-    as ``backup()`` reads its pages.
+    Contention is caught by a pre-flight read on each side, because the copy
+    cannot report it: CPython's ``backup()`` retries a locked database forever
+    with no cap, and its progress callback stays silent while it does
+    (measured) — a held lock had to become a hang. The pre-flight turns it into
+    ``DatabaseBusyError`` before the copy starts. A lock acquired *mid*-copy on
+    a rollback-journal database can still stall; kvseo databases are WAL, where
+    a mid-copy writer only restarts the snapshot, so that residual needs a
+    foreign database plus a writer arriving mid-copy.
 
-    Getting this backwards is worse than saying nothing: the previous version
-    told a user whose *destination* was a stray text file to delete their live
-    database.
+    Mid-copy failures are attributed by measurement, not by result code,
+    because the same code means opposite things at either end of the copy:
+    NOTADB can be a garbage destination *or* a source whose 16-byte magic is
+    intact over a broken header; CORRUPT can be the source's pages *or* a
+    truncated database at the destination. Asking the source whether it can
+    still answer a page read decides the side for any result code — inferring
+    from the code told a user whose destination was at fault to delete their
+    live database, twice, once through each arm.
 
-    A failed copy cleans up after itself — whatever it created at ``dest``
-    (partial file, sidecars) is removed before the error propagates, so no
-    caller has to know what a half-written backup looks like. A ``dest`` that
-    existed before the call is the user's and is left alone.
+    A failed copy cleans up after itself — when it *created* the destination,
+    whatever the failure left there (partial file, sidecars) is removed before
+    the error propagates. A destination that predates the call is the user's —
+    file and sidecars alike — and is left alone.
     """
     try:
         source = _connect(db_path)
@@ -346,17 +352,25 @@ def backup_to(db_path: Path, dest: Path) -> None:
     dest_preexisted = dest.exists()
     try:
         try:
-            target = sqlite3.connect(dest)
+            source.execute("SELECT 1 FROM sqlite_master").fetchone()
         except sqlite3.Error as exc:
+            _reject_unusable_file(db_path, exc)
+            _reject_busy(exc, needs="the backup copy")
+            raise
+        try:
+            target = sqlite3.connect(dest)
+            # BEGIN IMMEDIATE proves the destination is writable and unlocked
+            # before the copy starts; it acquires the write lock and reads the
+            # header without modifying a byte.
+            target.execute("BEGIN IMMEDIATE")
+            target.execute("ROLLBACK")
+        except sqlite3.Error as exc:
+            _reject_busy(exc, needs="the backup copy")
             raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
         try:
             source.backup(target)
         except sqlite3.Error as exc:
-            # Only corruption can still be the source's fault here — its header
-            # was verified above, so NOTADB at this point is the destination's.
-            if _primary_code(exc) == _SQLITE_CORRUPT:
-                _reject_unusable_file(db_path, exc)
-            raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
+            _blame_backup_side(db_path, dest, source, exc)
         finally:
             target.close()
     except BaseException:
@@ -366,25 +380,43 @@ def backup_to(db_path: Path, dest: Path) -> None:
         source.close()
 
 
+def _blame_backup_side(db_path: Path, dest: Path, source: sqlite3.Connection, exc: sqlite3.Error) -> NoReturn:
+    """Attribute a mid-copy failure to the side that actually broke.
+
+    The result code cannot carry the inference (see ``backup_to``), but the
+    open source connection can settle it: if it still answers a page read, the
+    source is healthy and the destination is what failed. The probe stays
+    correct for result codes nobody has enumerated.
+    """
+    try:
+        source.execute("PRAGMA page_count").fetchone()
+    except sqlite3.Error as source_exc:
+        _reject_unusable_file(db_path, source_exc)
+        _reject_busy(source_exc, needs="the backup copy")
+        raise
+    raise DatabaseFileError(_backup_dest_message(dest, exc)) from exc
+
+
 def _remove_backup_artifacts(dest: Path, *, spare_dest: bool) -> None:
     """Best-effort removal of what a failed copy left at the destination.
 
-    ``spare_dest`` keeps ``dest`` itself when it existed before the copy began —
-    a pre-existing file is the user's, not ours, and the failure mode that
-    reaches one (an existing non-database opens lazily and fails on first write)
-    leaves its content intact. The sidecars are always ours: the target opens as
-    a fresh database in rollback-journal mode, so a failed copy can leave a
-    ``-journal`` (or ``-wal``) with no matching backup in the directory the user
-    is told to trust for restores.
+    ``spare_dest`` means the destination existed before the copy began, and
+    then *everything* at that path is the user's — the file and its sidecars
+    alike. A pre-existing ``-wal`` or hot ``-journal`` is recovery data: a
+    committed row can live only in the WAL, so deleting the sidecar while
+    sparing the file destroys exactly what sparing was meant to protect. A
+    failed copy into a pre-existing destination touches nothing. Only when the
+    copy created the destination is the wreckage ours to remove — a fresh
+    partial file (and its sidecars) with no matching backup must not sit in the
+    directory the user is told to trust for restores.
 
     Best-effort because ``unlink`` needs write permission on the destination
     directory, and not having it is one of the reasons the copy failed — a
     cleanup that raises would replace the real error with a worse one.
     """
-    doomed = [dest.with_name(dest.name + "-journal"), dest.with_name(dest.name + "-wal")]
-    if not spare_dest:
-        doomed.insert(0, dest)
-    for path in doomed:
+    if spare_dest:
+        return
+    for path in (dest, dest.with_name(dest.name + "-journal"), dest.with_name(dest.name + "-wal")):
         with suppress(OSError):
             path.unlink()
 
