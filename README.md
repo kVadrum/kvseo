@@ -116,10 +116,10 @@ Time Machine) cover you too, for the same single-file reason.
 
 [MIT](./LICENSE) — free to use, modify, and distribute. KeMeK Network © 2026.
 
-### Trademarks
+### Names
 
-The "kvseo" and "kVadrum" names are trademarks of KeMeK Network. They are not
-covered by the MIT license, and no rights to use the names are granted by this
-repository. Independent forks must replace the brand name with their own.
+The "kvseo" and "kVadrum" names are not covered by the MIT license. KeMeK
+Network reserves all rights in them. Independent forks must replace the name
+with their own.
 
 A [kVadrum](https://kvadrum.com) Lab project, built in public.
