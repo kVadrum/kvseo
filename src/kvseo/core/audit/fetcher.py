@@ -3,8 +3,8 @@
 A thin async httpx wrapper: 30s total / 10s connect timeout, ≤5 redirects, a
 kvseo User-Agent. The body is streamed and the read aborts the moment it
 crosses a 5 MB cap, so a hostile or misconfigured host can't buffer a
-multi-GB / unbounded response whole into memory (a real concern under
-Poseidon's memory-capped user slice). No JavaScript execution — SPA-heavy
+multi-GB / unbounded response whole into memory (a real concern on a
+memory-capped host). No JavaScript execution — SPA-heavy
 pages get a partial DOM (a known v0.1 limitation; headless Chromium is v0.3+).
 
 Redirects are followed without host re-validation. kvseo is a local
