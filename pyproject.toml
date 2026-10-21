@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: Site Management",
 ]
 # Canonical version literal — /bump and bump-audit.sh target this field.
-version = "0.10.10"
+version = "0.10.11"
 
 # Runtime dependencies. The advisor (LiteLLM) is core IP per ADR-002; storage
 # is SQLAlchemy + Alembic per ADR-003. Bounds are deliberately loose for the
@@ -37,7 +37,9 @@ dependencies = [
     "litellm>=1.40,<2",
     "jinja2>=3.1",
     "markdown>=3.6",
-    "selectolax>=0.3.21",
+    # <1: selectolax 1.0 (2026-10-03) removed the Modest backend; `selectolax.parser`
+    # now raises ImportError on import. Port to selectolax.lexbor before lifting.
+    "selectolax>=0.3.21,<1",
     "platformdirs>=4.2",
     "keyring>=25",
     "google-auth>=2.29",
