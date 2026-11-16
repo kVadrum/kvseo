@@ -272,3 +272,52 @@ def test_schema_graph_shapes_are_understood(block: str, expected_types: list[str
     )
     assert doc.schema_blocks()[0].types == expected_types
     assert content.schema_valid(doc, _ctx()).verdict == "pass"
+
+
+def test_hierarchy_reads_headings_in_document_order() -> None:
+    """A skip is a property of reading order. The Modest backend returned a
+    grouped selector's matches grouped by selector — every h1, then every h2 —
+    so this page read as h1, h2, h3 and its h1 -> h3 skip went unreported."""
+    doc = ParsedDocument("<h1>Guide</h1><h3>Detail</h3><h2>Section</h2>", _BASE)
+    assert [h.level for h in doc.headings()] == [1, 3, 2]
+    result = headings.hierarchy(doc, _ctx())
+    assert result.verdict == "warn"
+    assert result.data["skips"] == [{"from": 1, "to": 3}]
+
+
+def test_empty_alt_reads_as_present() -> None:
+    """``Image.alt`` promises None for an absent attribute and "" for an empty
+    one; the Modest backend returned None for both."""
+    doc = ParsedDocument('<img src="a.png" alt=""><img src="b.png">', _BASE)
+    assert [img.alt for img in doc.images()] == ["", None]
+
+
+def test_duplicate_attribute_first_wins() -> None:
+    """Browsers keep the first of two duplicate attributes (HTML5 parse error
+    handling), so the second rel here is not the one a browser applies."""
+    doc = ParsedDocument(
+        '<a href="https://other.example/" target="_blank" rel="author" rel="noopener">x</a>', _BASE
+    )
+    assert doc.links()[0].rel == "author"
+    assert content.links_external_rel(doc, _ctx()).verdict == "warn"
+
+
+def test_declarative_shadow_roots_are_read_and_inert_templates_are_not() -> None:
+    """A ``<template shadowrootmode>`` is rendered (and flattened by Google's
+    indexer), so its headings and links count, in place, at any nesting depth.
+    A plain ``<template>`` is never rendered, so its content does not."""
+    doc = ParsedDocument(
+        "<h1>Top</h1>"
+        '<site-nav><template shadowrootmode="open">'
+        '<h2>Shadow</h2><a href="/in-shadow">s</a>'
+        '<nav-item><template shadowrootmode="closed"><a href="/nested">n</a></template></nav-item>'
+        "</template><p>light</p></site-nav>"
+        '<template><h2>Inert</h2><a href="/inert">i</a></template>'
+        "<h3>After</h3>",
+        _BASE,
+    )
+    assert [(h.level, h.text) for h in doc.headings()] == [(1, "Top"), (2, "Shadow"), (3, "After")]
+    assert [link.href for link in doc.links()] == [
+        "https://example.com/in-shadow",
+        "https://example.com/nested",
+    ]

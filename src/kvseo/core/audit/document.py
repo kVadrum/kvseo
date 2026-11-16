@@ -1,18 +1,26 @@
 """Parsed-document shim over selectolax (04-audit-engine.md §8).
 
 Checks receive a ``ParsedDocument`` rather than the raw parser, so the parser
-implementation can be swapped without touching every check. selectolax (C
-Modest/Lexbor engine) is 5-10x faster than BeautifulSoup on real HTML.
+implementation can be swapped without touching every check. selectolax's
+Lexbor backend is 5-10x faster than BeautifulSoup on real HTML, and it parses
+by the HTML5 spec: grouped selectors match in document order, ``alt=""``
+reads as present-but-empty, and the first of two duplicate attributes wins —
+three places the Modest backend it replaced disagreed with browsers.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
+
+# Bounds what a hostile page can cost: each nesting level is one re-parse of
+# the whole document. Real component trees nest far shallower.
+_MAX_SHADOW_DEPTH = 32
 
 
 @dataclass(frozen=True)
@@ -55,7 +63,7 @@ class ParsedDocument:
     """
 
     def __init__(self, html: str, base_url: str) -> None:
-        self._tree = HTMLParser(html)
+        self._tree = _parse_flattened(html)
         self._base = base_url
         self._headings: list[Heading] | None = None
         self._links: list[Link] | None = None
@@ -92,11 +100,12 @@ class ParsedDocument:
         return node.attributes.get("lang") if node else None
 
     def headings(self) -> list[Heading]:
-        # CSS selection returns nodes in document order — needed for hierarchy.
+        # Lexbor returns grouped-selector matches in document order, which the
+        # hierarchy check depends on (Modest returned every h1, then every h2...).
         if self._headings is None:
             out = []
             for node in self._tree.css("h1, h2, h3, h4, h5, h6"):
-                out.append(Heading(level=int(node.tag[1]), text=node.text(strip=True)))
+                out.append(Heading(level=int(str(node.tag)[1]), text=node.text(strip=True)))
             self._headings = out
         return self._headings
 
@@ -164,6 +173,41 @@ class ParsedDocument:
                 )
             self._schema_blocks = out
         return self._schema_blocks
+
+
+def _parse_flattened(html: str) -> LexborHTMLParser:
+    """Parse ``html`` with every declarative shadow root spliced into the tree.
+
+    By the HTML spec a ``<template>``'s content is a separate fragment that
+    selectors never reach. For an inert ``<template>`` that is right — nothing
+    renders it — but a declarative shadow root (``<template shadowrootmode>``,
+    what Lit SSR and MDN ship) is rendered, and Google flattens shadow DOM when
+    it indexes. Left alone, a server-rendered web-component page would read as
+    having no headings or links.
+
+    Each pass replaces every outermost shadow root with its content, in place,
+    so document order holds; roots nested inside one surface on the next pass.
+    Pages without shadow roots are parsed exactly once.
+    """
+    tree = LexborHTMLParser(html)
+    for _ in range(_MAX_SHADOW_DEPTH):
+        roots = tree.css("template[shadowrootmode]")
+        if not roots:
+            break
+        nonce = uuid.uuid4().hex
+        contents: dict[str, str] = {}
+        for i, node in enumerate(roots):
+            for name in list(node.attrs.keys()):
+                del node.attrs[name]
+            # With no attributes left the serialization is exactly
+            # "<template>" + content + "</template>".
+            contents[f"kvseo-shadow-{nonce}-{i}"] = (node.html or "")[len("<template>") : -len("</template>")]
+            node.replace_with(f"kvseo-shadow-{nonce}-{i}")
+        flat = tree.html or ""
+        for marker, content in contents.items():
+            flat = flat.replace(marker, content, 1)
+        tree = LexborHTMLParser(flat)
+    return tree
 
 
 def is_internal(href: str, host: str) -> bool:
