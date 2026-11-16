@@ -84,6 +84,34 @@ Lighthouse performance score: **{{ lab_performance }}/100**
 {% endfor %}
 {% endif %}
 
+{% if demand %}
+## Keyword demand
+
+_Search demand for “{{ demand.keyword }}”, from {{ demand.source }}._
+
+- Searches per month: **{{ demand.volume or "—" }}**
+- CPC: **{{ demand.cpc or "—" }}**
+- Ad competition (of 100): **{{ demand.competition or "—" }}**
+{% if demand.difficulty is not none %}
+- Ranking difficulty (of 100): **{{ demand.difficulty }}**
+{% endif %}
+{% if demand.intent %}
+- Search intent: **{{ demand.intent }}**
+{% endif %}
+
+{% endif %}
+{% if rankings %}
+## Tracked rankings
+
+_Positions SerpBear tracks for this page{% if keyword %}, and for the target keyword (marked ◆){% endif %}. Last checked {{ rankings_checked }}; change compares with the check about a week earlier._
+
+| Keyword | Position | Change | Market | Ranking page |
+|---|---:|---:|---|---|
+{% for r in rankings %}
+| {{ "◆ " if r.target else "" }}{{ r.keyword }} | {{ r.position if r.position is not none else "—" }} | {{ r.change or "—" }} | {{ r.where or "—" }} | {{ r.path or "not in the results" }} |
+{% endfor %}
+
+{% endif %}
 ## On-page findings
 
 {% if failed %}

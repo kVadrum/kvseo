@@ -137,9 +137,10 @@
   .lab-line { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:14px; }
   .lab-line b { color:var(--ink); }
 
-  /* Search Console — data table. Numerics are mono + right-aligned so columns
-     scan vertically; "striking distance" rows carry the one accent so the
-     actionable slice is findable without reading every position. */
+  /* Search Console — data table, shared by Tracked rankings. Numerics are mono +
+     right-aligned so columns scan vertically; "striking distance" rows (and the
+     target keyword's ranking) carry the one accent so the actionable slice is
+     findable without reading every position. */
   .gsc-note { font-family:var(--mono); font-size:11px; color:var(--muted); margin:0 0 14px; }
   .gsc-lead { font-size:14px; margin:0 0 16px; }
   .gsc-lead b { color:var(--accent); }
@@ -156,6 +157,10 @@
   table.gsc tr.hit td { background:var(--accent-soft); }
   table.gsc tr.hit td.q { font-weight:600; }
   .gsc-mark { color:var(--accent); font-family:var(--mono); margin-right:6px; }
+  table.gsc td.where { font-family:var(--mono); font-size:12px; color:var(--muted); white-space:nowrap; }
+  /* A text column after right-aligned figures needs its own gutter, or the two read as one. */
+  table.gsc .where { padding-left:18px; }
+  table.gsc td.path { font-family:var(--mono); font-size:12px; color:var(--muted); word-break:break-all; }
 
   /* Check lists */
   .checkrow { display:grid; grid-template-columns: 200px 1fr; gap:16px; padding:10px 0; border-top:1px solid var(--rule); align-items:baseline; }
@@ -327,6 +332,71 @@
       </tbody>
     </table>
   </div>
+  <hr class="rule">
+  {% endif %}
+
+  {% if demand %}
+  {% set sec.n = sec.n + 1 %}
+  <div class="sec"><span class="n">{{ "%02d" % sec.n }}</span> Keyword demand</div>
+  <p class="gsc-note">Search demand for “{{ demand.keyword }}”, from {{ demand.source }}</p>
+  <div class="vitals">
+    <div class="vital">
+      <div class="vl">Searches</div>
+      <div class="vv">{{ demand.volume or "—" }}</div>
+      <div class="vsub">per month</div>
+    </div>
+    <div class="vital">
+      <div class="vl">CPC</div>
+      <div class="vv">{{ demand.cpc or "—" }}</div>
+      <div class="vsub">what advertisers pay per click</div>
+    </div>
+    <div class="vital">
+      <div class="vl">Competition</div>
+      <div class="vv">{{ demand.competition or "—" }}</div>
+      <div class="vsub">for ad placements, of 100</div>
+    </div>
+    {% if demand.difficulty is not none %}
+    <div class="vital">
+      <div class="vl">Difficulty</div>
+      <div class="vv">{{ demand.difficulty }}</div>
+      <div class="vsub">to rank organically, of 100</div>
+    </div>
+    {% endif %}
+  </div>
+  {% if demand.intent %}
+  <div class="lab-line">Search intent: <b>{{ demand.intent }}</b></div>
+  {% endif %}
+  {% endif %}
+
+  {% if rankings %}
+  {% set sec.n = sec.n + 1 %}
+  <div class="sec"><span class="n">{{ "%02d" % sec.n }}</span> Tracked rankings</div>
+  <p class="gsc-note">Positions SerpBear tracks for this page{% if keyword %}, and for the target keyword (<span class="gsc-mark" style="margin:0">&#9670;</span>){% endif %} · last checked {{ rankings_checked }}</p>
+  <div class="gsc-wrap">
+    <table class="gsc">
+      <thead>
+        <tr>
+          <th>Keyword</th>
+          <th class="num">Position</th>
+          <th class="num">Change</th>
+          <th class="where">Market</th>
+          <th>Ranking page</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rankings %}
+        <tr class="{{ 'hit' if r.target else '' }}">
+          <td class="q">{% if r.target %}<span class="gsc-mark" aria-hidden="true">&#9670;</span>{% endif %}{{ r.keyword }}</td>
+          <td class="num">{{ r.position if r.position is not none else "—" }}</td>
+          <td class="num {{ 'v-pass' if r.change_kind == 'up' else ('v-fail' if r.change_kind == 'down' else 'muted') }}"{% if r.since %} title="since {{ r.since }}"{% endif %}>{{ r.change or "—" }}</td>
+          <td class="where">{{ r.where or "—" }}</td>
+          <td class="path">{{ r.path or "not in the results" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="gsc-note" style="margin-top:10px">Change compares with the check about a week earlier; a dash in Position means the page is outside what SerpBear tracked.</p>
   <hr class="rule">
   {% endif %}
 

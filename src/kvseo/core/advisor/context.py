@@ -121,7 +121,7 @@ def build_context(
         audit = _summarize(run, checks)
         gsc = recent_queries(session, run.fetched_url, limit=max_gsc_queries) if run.fetched_url else []
         psi = _recent_psi(session, run.fetched_url) if run.fetched_url else None
-        metrics = _keyword_metrics(session, run.keyword) if run.keyword else []
+        metrics = keyword_metrics(session, run.keyword) if run.keyword else []
         rankings = (
             rankings_for_page(session, run.fetched_url, run.keyword, limit=MAX_RANKINGS) if run.fetched_url else []
         )
@@ -136,7 +136,7 @@ def build_context(
     )
 
 
-def _keyword_metrics(session: Session, keyword: str) -> list[KeywordMetric]:
+def keyword_metrics(session: Session, keyword: str) -> list[KeywordMetric]:
     """The target keyword's demand data — DataForSEO's (or a CSV import into the
     same table) when stored, else OpenSEO's (the same data one hop removed),
     matching which one an audit pulls."""

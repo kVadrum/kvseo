@@ -14,6 +14,7 @@ from kvseo.connectors.gsc import GscQueryRow
 from kvseo.core.advisor.schemas import PrioritizationOutput, PriorityAction
 from kvseo.core.report.renderer import ReportError, _gsc, _load, render
 from kvseo.storage.models import AdvisorOutput as AdvisorOutputORM
+from kvseo.storage.models import DataForSeoData, SerpBearRanking
 
 
 def _add_advisor(engine: Engine, audit_id: uuid.UUID) -> None:
@@ -191,3 +192,54 @@ def test_unsupported_format_raises(audit_engine: Engine, seed: Callable[..., uui
 def test_missing_audit_raises(audit_engine: Engine) -> None:
     with pytest.raises(ReportError, match="not found"):
         render(uuid.uuid4(), "html", engine=audit_engine)
+
+
+def _add_v02_rows(engine: Engine) -> None:
+    positions = [9, 9, 8, 7, 6, 5, 4]
+    week = [{"date": f"2026-11-{d:02d}", "position": p} for d, p in zip(range(9, 16), positions, strict=True)]
+    with Session(engine) as s:
+        s.add(DataForSeoData(
+            resource_type="keyword_volume", resource_key="2840:en:ops consulting",
+            payload={"keyword": "ops consulting", "location_code": 2840, "language_code": "en",
+                     "search_volume": 2900, "cpc_usd": 9.48, "competition": 0.37,
+                     "monthly_searches": [], "fetched_at": "2026-11-16T00:00:00Z"},
+            source="csv",
+        ))
+        for keyword, position, history in [
+            ("ops consulting", 4, week),
+            ("kemek services", 2, [{"date": "2026-11-15", "position": 2}]),
+            ("small business ops audit", None, [{"date": f"2026-11-{d:02d}", "position": 40 if d < 15 else None}
+                                                for d in range(9, 16)]),
+        ]:
+            s.add(SerpBearRanking(domain="kemek.net", keyword=keyword, location="US", device="desktop",
+                                  position=position, url="https://kemek.net/services", history=history,
+                                  checked_at="2026-11-15T06:00:00.000Z", fetched_at="2026-11-16 00:00:00"))
+        s.commit()
+
+
+def test_v02_sections_render_demand_and_rankings(audit_engine: Engine, seed: Callable[..., uuid.UUID]) -> None:
+    aid = seed(audit_engine)
+    _add_v02_rows(audit_engine)
+    data = _load(aid, audit_engine)
+
+    assert data["demand"]["volume"] == "2,900"
+    assert data["demand"]["source"] == "a CSV import"  # provenance survives to the reader
+    # Target keyword first, then by position, unranked last.
+    assert [r["keyword"] for r in data["rankings"]] == ["ops consulting", "kemek services", "small business ops audit"]
+    target, steady, gone = data["rankings"]
+    assert (target["change"], target["change_kind"], target["since"]) == ("+5", "up", "2026-11-09")  # 9 -> 4
+    assert steady["change"] is None  # one check: nothing to compare against
+    assert (gone["change"], gone["change_kind"]) == ("dropped", "down")
+
+    html = render(aid, "html", engine=audit_engine)
+    assert "</span> Keyword demand</div>" in html and "</span> Tracked rankings</div>" in html
+    assert '<tr class="hit">' in html  # the target keyword's row carries the accent
+    md = render(aid, "md", engine=audit_engine)
+    assert "| ◆ ops consulting | 4 | +5 |" in md
+
+
+def test_v02_sections_are_absent_without_their_data(audit_engine: Engine, seed: Callable[..., uuid.UUID]) -> None:
+    aid = seed(audit_engine)
+    html = render(aid, "html", engine=audit_engine)
+    # Match the section header, not the words: the stylesheet mentions the rankings table.
+    assert "</span> Keyword demand</div>" not in html and "</span> Tracked rankings</div>" not in html

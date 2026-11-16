@@ -1,8 +1,10 @@
 """Report renderer: one stored audit -> a self-contained report (ADR-005).
 
-v0.1 renders a *single* audit run (plus its latest advisor recommendation and
-Core Web Vitals) to either a self-contained HTML file — inline CSS, system fonts,
-zero external requests, print-to-PDF friendly — or clean Markdown. The monthly
+It renders a *single* audit run (plus its latest advisor recommendation, Core
+Web Vitals, Search Console queries, and — when those sources are connected —
+the target keyword's demand and the page's tracked rankings) to either a
+self-contained HTML file — inline CSS, system fonts, zero external requests,
+print-to-PDF friendly — or clean Markdown. The monthly
 aggregate report (``kvseo report`` over a date range) needs month-over-month
 history to be useful and lands with that history in a later cut (05 §1).
 
@@ -17,6 +19,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import jinja2
 from sqlalchemy import select
@@ -24,7 +27,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from kvseo.connectors.gsc import GscQueryRow, recent_queries
+from kvseo.connectors.serpbear import SerpBearRanking, rankings_for_page
 from kvseo.core.advisor.client import latest_run
+from kvseo.core.advisor.context import KeywordMetric, keyword_metrics
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
 from kvseo.storage.models import PsiResult as PsiResultORM
@@ -46,6 +51,12 @@ _CWV_BANDS: dict[str, tuple[float, float]] = {
 # The impressions floor keeps long-tail noise out: a query at position 12 with
 # 3 impressions is a rounding error, not an opportunity worth an action item.
 _GSC_LIMIT = 15
+_RANKINGS_LIMIT = 25
+# Rank change is read against the check this many points back in SerpBear's
+# history: about a week at its default daily cadence, long enough to mean
+# something, short enough to still describe this page's current state.
+_TREND_POINTS = 7
+_SOURCE_NAMES = {"dataforseo": "DataForSEO", "openseo": "OpenSEO", "csv": "a CSV import"}
 _STRIKING_POS = (5.0, 20.0)
 _STRIKING_MIN_IMPRESSIONS = 10
 
@@ -98,6 +109,12 @@ def _load(audit_id: uuid.UUID, engine: Engine) -> dict[str, Any]:
         gsc_rows = (
             recent_queries(session, run.fetched_url, limit=_GSC_LIMIT) if run.fetched_url else []
         )
+        rankings = (
+            rankings_for_page(session, run.fetched_url, run.keyword, limit=_RANKINGS_LIMIT)
+            if run.fetched_url
+            else []
+        )
+        demand = keyword_metrics(session, run.keyword) if run.keyword else []
     advisor = latest_run(audit_id, engine)
     gsc = _gsc(gsc_rows)
 
@@ -135,6 +152,9 @@ def _load(audit_id: uuid.UUID, engine: Engine) -> dict[str, Any]:
         "gsc": gsc,
         "gsc_striking": sum(1 for q in gsc if q["striking"]),
         "gsc_range": _gsc_range(gsc_rows),
+        "demand": _demand(demand[0]) if demand else None,
+        "rankings": sorted((_ranking(r, run.keyword) for r in rankings), key=_ranking_order),
+        "rankings_checked": max((r.checked_at[:10] for r in rankings), default=None),
     }
 
 
@@ -177,6 +197,68 @@ def _gsc(rows: list[GscQueryRow]) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def _demand(m: KeywordMetric) -> dict[str, Any]:
+    """The target keyword's demand, formatted for the metric tiles. Competition
+    arrives as 0-1 from every source and reads more naturally out of 100."""
+    return {
+        "keyword": m.keyword,
+        "source": _SOURCE_NAMES[m.source],
+        "volume": f"{m.monthly_volume:,}" if m.monthly_volume is not None else None,
+        "cpc": f"${m.cpc_usd:.2f}" if m.cpc_usd is not None else None,
+        "competition": f"{round(m.competition * 100)}" if m.competition is not None else None,
+        "difficulty": m.keyword_difficulty,
+        "intent": m.intent,
+    }
+
+
+def _ranking(r: SerpBearRanking, keyword: str | None) -> dict[str, Any]:
+    return {
+        "keyword": r.keyword,
+        "position": r.position,
+        "where": " ".join(part for part in (r.location, r.device) if part),
+        "path": _path(r.url),
+        "url": r.url,
+        "target": bool(keyword) and r.keyword.lower() == (keyword or "").strip().lower(),
+        **_change(r),
+    }
+
+
+def _ranking_order(row: dict[str, Any]) -> tuple[bool, bool, int, str]:
+    """Target keyword first, then best position first, unranked last."""
+    position = row["position"]
+    return (not row["target"], position is None, position or 0, row["keyword"])
+
+
+def _change(r: SerpBearRanking) -> dict[str, Any]:
+    """Position change since the check ``_TREND_POINTS`` back. Lower is better,
+    so moving from 9 to 4 is a gain of 5. A page entering or leaving the tracked
+    results has no number to subtract, so it is named instead."""
+    earlier = r.history[-_TREND_POINTS:-1] if len(r.history) > 1 else []
+    if not earlier:
+        return {"change": None, "change_kind": "none", "since": None}
+    then, since = earlier[0].position, earlier[0].date
+    now = r.position
+    if then is None and now is None:
+        return {"change": None, "change_kind": "none", "since": since}
+    if then is None:
+        return {"change": "entered", "change_kind": "up", "since": since}
+    if now is None:
+        return {"change": "dropped", "change_kind": "down", "since": since}
+    delta = then - now
+    if delta == 0:
+        return {"change": "0", "change_kind": "flat", "since": since}
+    # A true minus sign: the column is right-aligned figures, and a hyphen reads short.
+    shown = f"{delta:+d}".replace("-", "\u2212")
+    return {"change": shown, "change_kind": "up" if delta > 0 else "down", "since": since}
+
+
+def _path(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    return (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
 
 
 def _gsc_range(rows: list[GscQueryRow]) -> str | None:
