@@ -6,6 +6,7 @@ OAuth-issued access token (the flow itself lives in gsc_auth).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
@@ -22,7 +23,7 @@ from kvseo.connectors.base import (
     ConnectorRateLimited,
     ConnectorUnavailable,
 )
-from kvseo.connectors.gsc import GscConnector, GscSite
+from kvseo.connectors.gsc import GscConnector, GscPagePull, GscSite, property_for
 from kvseo.storage.db import get_engine, migrate
 from kvseo.storage.models import GscQuery as GscQueryORM
 
@@ -169,3 +170,67 @@ async def test_server_error_is_unavailable() -> None:
     conn = GscConnector(access_token="tok", client=_client({}, status=503))
     with pytest.raises(ConnectorUnavailable):
         await conn.sites()
+
+
+# --- the audit's page pull -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sites", "url", "expected"),
+    [
+        # The longest covering URL-prefix wins over a broader one and a domain.
+        (
+            [("sc-domain:kemek.net", "siteOwner"), ("https://kemek.net/", "siteOwner"),
+             ("https://kemek.net/blog/", "siteFullUser")],
+            "https://kemek.net/blog/post",
+            "https://kemek.net/blog/",
+        ),
+        # A URL-prefix property is scheme-exact; the domain property covers both.
+        ([("http://kemek.net/", "siteOwner"), ("sc-domain:kemek.net", "siteOwner")],
+         "https://kemek.net/x", "sc-domain:kemek.net"),
+        # Domain properties cover subdomains, but not lookalike hosts.
+        ([("sc-domain:kemek.net", "siteOwner")], "https://www.kemek.net/", "sc-domain:kemek.net"),
+        ([("sc-domain:kemek.net", "siteOwner")], "https://notkemek.net/", None),
+        # An unverified grant cannot be queried, so it never matches.
+        ([("https://kemek.net/", "siteUnverifiedUser")], "https://kemek.net/a", None),
+        ([], "https://kemek.net/a", None),
+    ],
+)
+def test_property_for(sites: list[tuple[str, str]], url: str, expected: str | None) -> None:
+    gsc_sites = [GscSite(site_url=s, permission_level=p) for s, p in sites]
+    assert property_for(url, gsc_sites) == expected
+
+
+def _routed(seen: list[httpx.Request], sites: Any) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/sites"):
+            return httpx.Response(200, json=sites)
+        return httpx.Response(200, json=QUERIES_PAYLOAD)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_pull_page_queries_the_covering_property_over_90_days(tmp_path: Path) -> None:
+    db = tmp_path / "kvseo.db"
+    migrate(db)
+    engine = get_engine(db)
+    seen: list[httpx.Request] = []
+    conn = GscConnector(access_token="tok", engine=engine, client=_routed(seen, SITES_PAYLOAD))
+
+    pull = await conn.pull_page(URL, today=date(2026, 6, 10))
+
+    assert pull == GscPagePull(property=SITE, queries=2)
+    body = json.loads(seen[1].content)
+    # Ends three days back (GSC's finalisation lag) and spans 90 days inclusive.
+    assert (body["startDate"], body["endDate"]) == ("2026-03-10", "2026-06-07")
+    assert body["dimensionFilterGroups"][0]["filters"][0]["expression"] == URL
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(GscQueryORM)) == 2
+
+
+async def test_pull_page_outside_every_property_is_a_result_not_an_error() -> None:
+    seen: list[httpx.Request] = []
+    conn = GscConnector(access_token="tok", client=_routed(seen, SITES_PAYLOAD))
+    assert await conn.pull_page("https://elsewhere.example/") == GscPagePull(property=None, queries=0)
+    assert len(seen) == 1  # listed the properties, queried nothing

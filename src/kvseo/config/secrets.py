@@ -1,8 +1,10 @@
 """Secret storage via the OS keyring (Keychain / Credential Manager / libsecret).
 
-Config files reference secrets by name, never by value (02-architecture.md §7).
-Service namespace is ``kvseo``; keys are ``<connector>:<field>`` — e.g.
-``psi:api_key``, ``gsc:refresh_token``.
+Secrets never go in ``config.toml``: ``kvseo connect <name>`` writes them here
+and connectors read them back by key (02-architecture.md §7). Service namespace
+is ``kvseo``; keys are ``<connector>:<field>`` — e.g. ``psi:api_key``,
+``gsc:refresh_token``. Where a connector also honours an environment variable
+(``PSI_API_KEY``), it reads that directly; there is no ``env:`` indirection.
 """
 
 from __future__ import annotations

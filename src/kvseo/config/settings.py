@@ -1,9 +1,8 @@
 """Typed configuration schema, loaded from ``config.toml``.
 
-The schema is intentionally small for v0.1 (advisor / storage / report).
-Connector sections and the ``env:`` secret-indirection resolver land in the
-connector build; secrets are never stored in this file (they live in the OS
-keyring — see 02-architecture.md §7).
+The schema is intentionally small (advisor / storage / report). Connectors have
+no section here: ``kvseo connect <name>`` stores their credentials in the OS
+keyring (see :mod:`kvseo.config.secrets`), so this file never holds a secret.
 """
 
 from __future__ import annotations
@@ -61,15 +60,12 @@ temperature = 0.2
 cache_enabled = false
 
 [storage]
-litestream_enabled = false    # opt-in S3 replication; see the README
+litestream_enabled = false    # reserved: Litestream replication is not wired yet
 litestream_url = ""
 
 [report]
 default_format = "html"       # v0.1: md | html
 
-# Connectors are configured via `kvseo connect <name>` (v0.1 build).
-# [connectors.gsc]
-# property = "https://example.com/"
-# [connectors.psi]
-# api_key = "env:PSI_API_KEY"
+# Connectors are configured with `kvseo connect <name>`, which keeps their
+# credentials in the OS keyring rather than in this file.
 """

@@ -1,9 +1,12 @@
 """Context assembly for the advisor (05-advisor-prompts.md §3).
 
 The advisor never touches SQLite. It sees a :class:`Context` assembled here from
-the stored audit plus the connector rows that audit can reference. Two payoffs
-(05 §3): runs are reproducible from the context bytes, and every recommendation
-the model makes can be traced back to a context row (R1).
+the stored audit plus the connector rows that audit can reference, and nothing
+else (05 §3). That makes the context the unit of replay — a test can snapshot
+one and run it again — and the unit of traceability: every evidence ref in the
+model's answer is resolved against the context it was shown (R1), see
+:meth:`Context.evidence_index`. The context itself is not persisted; replaying
+a past production run means rebuilding it from the stored rows.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from kvseo.connectors.gsc import GscQueryRow, recent_queries
 from kvseo.connectors.psi import PsiConnector, PsiResult
+from kvseo.core.advisor.schemas import EvidenceIndex
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
 from kvseo.storage.models import PsiResult as PsiResultORM
@@ -60,6 +64,14 @@ class Context(BaseModel):
     gsc_queries: list[GscQueryRow] = Field(default_factory=list)
     psi: PsiResult | None = None
     target_keyword: str | None = None
+
+    def evidence_index(self) -> EvidenceIndex:
+        """Everything in this context an evidence ref may cite."""
+        a = self.audit
+        checks = [c.id for c in (*a.failed, *a.warned)] + a.passed_ids + a.not_assessed_ids
+        return EvidenceIndex(
+            check_ids=frozenset(checks), gsc_rows=len(self.gsc_queries), has_psi=self.psi is not None
+        )
 
 
 def build_context(

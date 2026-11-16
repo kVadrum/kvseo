@@ -242,3 +242,29 @@ async def test_missing_key_raises_before_any_call(
         await prioritize(aid, engine=audit_engine, settings=_settings())
     with Session(audit_engine) as s:
         assert s.scalar(select(func.count()).select_from(AdvisorOutputORM)) == 0
+
+
+async def test_hallucinated_evidence_is_retried_with_the_reason(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    """R1: a reply citing only checks that never ran is rejected, and the retry
+    says why — a bare "return valid JSON" would invite the same reply again."""
+    aid = seed(audit_engine)
+    hallucinated = json.dumps(
+        {"summary": "x", "actions": [{**_GOOD_ACTION, "evidence": ["meta.keywords", "gsc.queries[7]"]}]}
+    )
+    seen: list[list[dict[str, str]]] = []
+    scripted = iter([hallucinated, _GOOD_JSON])
+
+    async def complete(**kwargs: Any) -> Any:
+        seen.append(kwargs["messages"])
+        return _Resp(next(scripted))
+
+    run = await prioritize(aid, engine=audit_engine, settings=_settings(), completion=complete)
+
+    assert run.status == "success"
+    retry = seen[1][-1]["content"]
+    assert "Validation error:" in retry
+    assert "absent from the context" in retry
+    assert run.output is not None
+    assert run.output.actions[0].evidence == ["title.length", "gsc.queries[0]"]

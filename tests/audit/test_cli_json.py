@@ -16,6 +16,9 @@ import pytest
 from sqlalchemy.engine import Engine
 
 from kvseo.cli import audit as audit_cli
+from kvseo.connectors.base import ConnectorAuthError
+from kvseo.connectors.gsc import GscConnector, GscPagePull
+from kvseo.connectors.gsc_auth import CLIENT_CONFIG_KEY, REFRESH_TOKEN_KEY
 from kvseo.core.advisor.context import AdvisorError
 from kvseo.core.audit.engine import AuditResult
 
@@ -88,3 +91,58 @@ def test_json_preserves_non_ascii() -> None:
     assert "Operations Consulting — KeMeK · café" in payload
     assert "\\u2014" not in payload
     assert json.loads(payload)["page_title"] == result.page_title
+
+
+def test_json_carries_the_gsc_outcome() -> None:
+    result = _result().model_copy(update={"gsc_error": "Search Console access was revoked"})
+    payload = json.loads(audit_cli._audit_json(result, None))
+    assert payload["gsc"] is None
+    assert payload["gsc_error"] == "Search Console access was revoked"
+
+
+@pytest.fixture
+def keyring_dict(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    store: dict[str, str] = {}
+    monkeypatch.setattr(audit_cli, "get_secret", store.get)
+    return store
+
+
+def test_gsc_pull_is_absent_until_gsc_is_connected(keyring_dict: dict[str, str], audit_engine: Engine) -> None:
+    # Not connected is the normal first-audit state: no pull, so no error either.
+    assert audit_cli._gsc_pull(audit_engine) is None
+
+
+async def test_gsc_pull_refreshes_with_the_stored_client(
+    keyring_dict: dict[str, str], audit_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyring_dict[REFRESH_TOKEN_KEY] = "rt"
+    keyring_dict[CLIENT_CONFIG_KEY] = json.dumps({"installed": {"client_id": "stored"}})
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_ID", raising=False)
+    calls: list[tuple[str, object]] = []
+
+    async def _refresh(token: str, config: dict[str, object]) -> str:
+        calls.append((token, config))
+        return "access"
+
+    async def _pull_page(self: GscConnector, url: str) -> GscPagePull:
+        calls.append(("pull", (self._token, url)))
+        return GscPagePull(property="https://kemek.net/", queries=3)
+
+    monkeypatch.setattr(audit_cli, "refresh_access_token", _refresh)
+    monkeypatch.setattr(GscConnector, "pull_page", _pull_page)
+    pull = audit_cli._gsc_pull(audit_engine)
+    assert pull is not None
+    assert await pull("https://kemek.net/a") == GscPagePull(property="https://kemek.net/", queries=3)
+    assert calls == [("rt", {"installed": {"client_id": "stored"}}), ("pull", ("access", "https://kemek.net/a"))]
+
+
+async def test_gsc_pull_for_a_pre_0_11_grant_without_an_env_client_says_reconnect(
+    keyring_dict: dict[str, str], audit_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyring_dict[REFRESH_TOKEN_KEY] = "rt"  # stored before the client config was
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_ID", raising=False)
+    monkeypatch.delenv("KVSEO_GSC_CLIENT_SECRET", raising=False)
+    pull = audit_cli._gsc_pull(audit_engine)
+    assert pull is not None
+    with pytest.raises(ConnectorAuthError):
+        await pull("https://kemek.net/a")

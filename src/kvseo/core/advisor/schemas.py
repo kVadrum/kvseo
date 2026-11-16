@@ -4,9 +4,12 @@ These are the contract the model is held to: a response that doesn't validate
 triggers one retry, then a logged ``invalid_output`` row (§6.3). Two disciplines
 are baked in:
 
-* **R1 — every claim cites evidence.** A :class:`PriorityAction` with no
-  evidence refs is rejected by a validator, not merely discouraged in the
-  prompt. The advisor exists to be auditable; an unsourced action defeats it.
+* **R1 — every claim cites evidence that exists.** A :class:`PriorityAction`
+  with no evidence refs is rejected by a validator, not merely discouraged in
+  the prompt. Validated with an :class:`EvidenceIndex` (pydantic validation
+  context), each ref must also resolve to something the model was shown: refs
+  that don't are dropped, and an action left with none is rejected — a citation
+  to a check that never ran is how a hallucinated claim looks authoritative.
 * **R8 — schema evolution is additive.** New fields ship with defaults and are
   never required; field removal is a major bump; every persisted row carries
   ``schema_version`` so old rows stay readable.
@@ -14,15 +17,37 @@ are baked in:
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
 ADVISOR_OUTPUT_SCHEMA_VERSION = 1
 
 Impact = Literal["high", "medium", "low"]
 Effort = Literal["low", "medium", "high"]
 Category = Literal["on_page", "content", "technical", "performance"]
+
+# The prompt teaches `gsc.queries[3]`; the context JSON names the list `gsc_queries`.
+_GSC_REF = re.compile(r"gsc(?:\.|_)queries\[(\d+)\]")
+
+
+@dataclass(frozen=True)
+class EvidenceIndex:
+    """What an evidence ref may point at: the context the model was shown."""
+
+    check_ids: frozenset[str]
+    gsc_rows: int
+    has_psi: bool
+
+    def resolves(self, ref: str) -> bool:
+        ref = ref.strip()
+        if ref in self.check_ids:
+            return True
+        if match := _GSC_REF.fullmatch(ref):
+            return int(match.group(1)) < self.gsc_rows
+        return self.has_psi and (ref == "psi" or ref.startswith("psi."))
 
 
 class PriorityAction(BaseModel):
@@ -42,10 +67,21 @@ class PriorityAction(BaseModel):
     category: Category
 
     @model_validator(mode="after")
-    def _require_evidence(self) -> PriorityAction:
+    def _require_evidence(self, info: ValidationInfo) -> PriorityAction:
         # R1: an action with nothing to cite is not actionable — it's an opinion.
-        if not [ref for ref in self.evidence if ref.strip()]:
+        refs = [ref for ref in self.evidence if ref.strip()]
+        if not refs:
             raise ValueError(f"action '{self.title}' cites no evidence (R1)")
+        # Only a fresh model reply is validated with an index; a stored output
+        # re-read for a report was resolved when it was written.
+        index = (info.context or {}).get("evidence")
+        if isinstance(index, EvidenceIndex):
+            resolved = [ref for ref in refs if index.resolves(ref)]
+            if not resolved:
+                raise ValueError(
+                    f"action '{self.title}' cites evidence absent from the context: {refs} (R1)"
+                )
+            self.evidence = resolved
         return self
 
 

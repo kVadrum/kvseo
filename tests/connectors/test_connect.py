@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import keyring
@@ -10,7 +11,11 @@ from keyring.errors import NoKeyringError
 from typer.testing import CliRunner
 
 from kvseo.cli import app
+from kvseo.cli import connect as connect_cli
 from kvseo.config.secrets import get_secret
+from kvseo.connectors.base import ConnectorUnavailable
+from kvseo.connectors.gsc import GscSite
+from kvseo.connectors.gsc_auth import CLIENT_CONFIG_KEY, REFRESH_TOKEN_KEY
 
 runner = CliRunner()
 
@@ -79,3 +84,44 @@ def test_connect_psi_reports_missing_keyring_backend(monkeypatch: pytest.MonkeyP
     result = runner.invoke(app, ["connect", "psi", "--api-key", "test-key-123"])
     assert result.exit_code == 3
     assert "no OS keyring backend" in result.output
+
+
+def test_connect_gsc_stores_the_grant_with_its_client_and_lists_properties(
+    memory_keyring: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A refresh token only refreshes against the client that minted it, so the
+    # client config is stored beside it rather than re-read from the env later.
+    monkeypatch.setenv("KVSEO_GSC_CLIENT_ID", "cid")
+    monkeypatch.setenv("KVSEO_GSC_CLIENT_SECRET", "csecret")
+    monkeypatch.setattr(connect_cli, "run_oauth_flow", lambda config, port=0: "rt-123")
+
+    async def _props(refresh_token: str, config: dict[str, object]) -> list[GscSite]:
+        assert refresh_token == "rt-123"
+        return [GscSite(site_url="sc-domain:kemek.net", permission_level="siteOwner")]
+
+    monkeypatch.setattr(connect_cli, "_properties", _props)
+    result = runner.invoke(app, ["connect", "gsc"])
+
+    assert result.exit_code == 0, result.output
+    assert get_secret(REFRESH_TOKEN_KEY) == "rt-123"
+    stored = json.loads(get_secret(CLIENT_CONFIG_KEY) or "{}")
+    assert stored["installed"]["client_id"] == "cid"
+    assert "sc-domain:kemek.net" in result.stdout
+
+
+def test_connect_gsc_keeps_the_grant_when_listing_fails(
+    memory_keyring: dict[tuple[str, str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KVSEO_GSC_CLIENT_ID", "cid")
+    monkeypatch.setenv("KVSEO_GSC_CLIENT_SECRET", "csecret")
+    monkeypatch.setattr(connect_cli, "run_oauth_flow", lambda config, port=0: "rt-123")
+
+    async def _down(refresh_token: str, config: dict[str, object]) -> list[GscSite]:
+        raise ConnectorUnavailable("GSC timed out on /sites")
+
+    monkeypatch.setattr(connect_cli, "_properties", _down)
+    result = runner.invoke(app, ["connect", "gsc"])
+
+    assert result.exit_code == 0
+    assert get_secret(REFRESH_TOKEN_KEY) == "rt-123"
+    assert "timed out" in result.output

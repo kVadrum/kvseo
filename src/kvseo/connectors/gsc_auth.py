@@ -4,6 +4,10 @@ Isolated from ``gsc.py`` so the data connector stays google-auth-free and
 testable. The OAuth client config comes from kvseo's managed client (env vars,
 pending provisioning — R20) or a user-supplied ``client_secrets.json`` via
 ``--client-secrets``. Scope is ``webmasters.readonly``: read-only by design.
+
+A refresh token is bound to the client that minted it, so ``connect gsc``
+stores the client config beside the token and every later refresh uses that
+stored config — not whatever the environment happens to hold that day.
 """
 
 from __future__ import annotations
@@ -13,18 +17,26 @@ import os
 from pathlib import Path
 from typing import Any
 
-from kvseo.connectors.base import ConnectorAuthError
+import httpx
 
-# google-auth / google-auth-oauthlib are imported lazily inside the two functions
-# that use them: they cost ~90ms to import and are only needed for `connect gsc`,
-# so keeping them out of module scope keeps every other command's startup fast.
+from kvseo.connectors.base import ConnectorAuthError, ConnectorUnavailable
+
+# google-auth-oauthlib is imported lazily inside run_oauth_flow: with google-auth
+# it costs ~90ms to import and is only needed for `connect gsc`, so keeping it out
+# of module scope keeps every other command's startup fast. The refresh is a
+# plain token-endpoint POST over httpx, so audits never import it at all.
 
 _SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
+_TIMEOUT = httpx.Timeout(30.0)
+
+# Keyring names `connect gsc` writes and every audit reads.
+REFRESH_TOKEN_KEY = "gsc:refresh_token"
+CLIENT_CONFIG_KEY = "gsc:client_config"
 
 
-def _client_config(client_secrets: Path | None = None) -> dict[str, Any]:
+def client_config(client_secrets: Path | None = None) -> dict[str, Any]:
     """Build the OAuth client config from a file, or kvseo's managed client (env)."""
     if client_secrets is not None:
         try:
@@ -56,8 +68,8 @@ def _client_config(client_secrets: Path | None = None) -> dict[str, Any]:
     }
 
 
-def run_oauth_flow(*, client_secrets: Path | None = None, port: int = 0) -> str:
-    """Run the installed-app browser flow and return the refresh token.
+def run_oauth_flow(config: dict[str, Any], *, port: int = 0) -> str:
+    """Run the installed-app browser flow against ``config``; return the refresh token.
 
     Headless/no-browser hosts are a known gap (Google retired the OOB paste
     flow): use ``--client-secrets`` on a machine with a browser, or run the
@@ -65,7 +77,7 @@ def run_oauth_flow(*, client_secrets: Path | None = None, port: int = 0) -> str:
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
-    flow = InstalledAppFlow.from_client_config(_client_config(client_secrets), scopes=_SCOPES)
+    flow = InstalledAppFlow.from_client_config(config, scopes=_SCOPES)
     creds = flow.run_local_server(port=port, prompt="consent")
     if not creds.refresh_token:
         raise ConnectorAuthError(
@@ -75,22 +87,47 @@ def run_oauth_flow(*, client_secrets: Path | None = None, port: int = 0) -> str:
     return str(creds.refresh_token)
 
 
-def access_token_from_refresh(
-    refresh_token: str, *, client_secrets: Path | None = None
+async def refresh_access_token(
+    refresh_token: str, config: dict[str, Any], *, client: httpx.AsyncClient | None = None
 ) -> str:
-    """Exchange a stored refresh token for a fresh access token."""
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
+    """Exchange a stored refresh token for a fresh access token.
 
-    config = _client_config(client_secrets)
+    ``invalid_grant`` is the one answer that means the stored grant is dead
+    (revoked, expired after 6 months unused, or a password change), so it is
+    the one that tells the user to reconnect; a transport failure or a 5xx is
+    an outage, and reconnecting would not fix it.
+    """
     installed = config.get("installed") or config.get("web") or {}
-    creds = Credentials(  # type: ignore[no-untyped-call]  # google-auth is partially typed
-        token=None,
-        refresh_token=refresh_token,
-        token_uri=installed.get("token_uri", _TOKEN_URI),
-        client_id=installed["client_id"],
-        client_secret=installed["client_secret"],
-        scopes=_SCOPES,
-    )
-    creds.refresh(Request())  # type: ignore[no-untyped-call]
-    return str(creds.token)
+    try:
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": installed["client_id"],
+            "client_secret": installed["client_secret"],
+        }
+    except KeyError as exc:
+        raise ConnectorAuthError(
+            f"the stored GSC OAuth client config has no {exc} — re-run `kvseo connect gsc`"
+        ) from exc
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    try:
+        resp = await http.post(installed.get("token_uri", _TOKEN_URI), data=data)
+    except httpx.HTTPError as exc:
+        raise ConnectorUnavailable(f"couldn't reach Google's token endpoint: {exc}") from exc
+    finally:
+        if client is None:
+            await http.aclose()
+    if resp.status_code >= 500:
+        raise ConnectorUnavailable(f"Google's token endpoint returned {resp.status_code}")
+    try:
+        body: dict[str, Any] = resp.json()
+    except ValueError as exc:
+        raise ConnectorUnavailable(f"Google's token endpoint returned non-JSON ({resp.status_code})") from exc
+    if resp.status_code != 200 or "access_token" not in body:
+        error = body.get("error", f"http_{resp.status_code}")
+        if error == "invalid_grant":
+            raise ConnectorAuthError(
+                "Search Console access was revoked or has expired — re-run `kvseo connect gsc`"
+            )
+        raise ConnectorAuthError(f"Google refused the GSC token refresh ({error}) — re-run `kvseo connect gsc`")
+    return str(body["access_token"])

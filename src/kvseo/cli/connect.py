@@ -7,6 +7,7 @@ OpenSEO / SerpBear / DataForSEO connectors are v0.2 (ADR-004).
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -15,9 +16,16 @@ import typer
 
 from kvseo.cli._util import open_db
 from kvseo.config.secrets import SecretStorageError, set_secret
-from kvseo.connectors.base import ConnectorAuthError
+from kvseo.connectors.base import ConnectorAuthError, ConnectorError
 from kvseo.connectors.csv import CsvConnector, CsvImportError, ImportResult
-from kvseo.connectors.gsc_auth import run_oauth_flow
+from kvseo.connectors.gsc import GscConnector, GscSite
+from kvseo.connectors.gsc_auth import (
+    CLIENT_CONFIG_KEY,
+    REFRESH_TOKEN_KEY,
+    client_config,
+    refresh_access_token,
+    run_oauth_flow,
+)
 
 app = typer.Typer(
     help="Connect kvseo to a read-only data source.", no_args_is_help=True
@@ -35,15 +43,41 @@ def gsc(
         typer.Option("--port", help="Local OAuth callback port (0 = auto-pick)."),
     ] = 0,
 ) -> None:
-    """Connect Google Search Console via OAuth (stores a refresh token)."""
+    """Connect Google Search Console via OAuth; audits then pull its query data."""
     try:
-        refresh_token = run_oauth_flow(client_secrets=client_secrets, port=port)
+        config = client_config(client_secrets)
+        refresh_token = run_oauth_flow(config, port=port)
     except ConnectorAuthError as exc:
         # Auth failure is exit 4 (06 §2 / §4.4), not the generic 1.
         typer.secho(str(exc), fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(code=4) from exc
-    _store("gsc:refresh_token", refresh_token)
-    typer.echo("Connected Google Search Console — refresh token stored.")
+    # The client config first: a stray config without a token is inert, while a
+    # token whose client was never stored could not be refreshed.
+    _store(CLIENT_CONFIG_KEY, json.dumps(config))
+    _store(REFRESH_TOKEN_KEY, refresh_token)
+    typer.echo("Connected Google Search Console.")
+    try:
+        sites = asyncio.run(_properties(refresh_token, config))
+    except ConnectorError as exc:
+        # The grant is stored and audits will retry; this was only the confirmation.
+        typer.secho(f"Couldn't list your properties just now ({exc}).", fg=typer.colors.YELLOW, err=True)
+        return
+    if not sites:
+        typer.secho(
+            "This Google account has no Search Console properties, so audits will have no GSC data.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        return
+    typer.echo("Audits will pull query data for pages under:")
+    for site in sites:
+        typer.echo(f"   {site.site_url}")
+
+
+async def _properties(refresh_token: str, config: dict[str, object]) -> list[GscSite]:
+    token = await refresh_access_token(refresh_token, config)
+    sites = await GscConnector(access_token=token).sites()
+    return [s for s in sites if s.permission_level != "siteUnverifiedUser"]
 
 
 @app.command()

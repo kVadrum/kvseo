@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from kvseo.core.advisor.schemas import (
     ADVISOR_OUTPUT_SCHEMA_VERSION,
+    EvidenceIndex,
     PrioritizationOutput,
     PriorityAction,
 )
@@ -61,3 +62,44 @@ def test_empty_output_is_valid() -> None:
     out = PrioritizationOutput()
     assert out.actions == []
     assert out.schema_version == ADVISOR_OUTPUT_SCHEMA_VERSION
+
+
+_INDEX = EvidenceIndex(check_ids=frozenset({"title.length", "cwv.lcp"}), gsc_rows=2, has_psi=False)
+
+
+@pytest.mark.parametrize(
+    ("ref", "resolves"),
+    [
+        ("title.length", True),
+        (" title.length ", True),
+        ("title.lenght", False),  # a near-miss is not the check
+        ("gsc.queries[1]", True),
+        ("gsc_queries[0]", True),  # the context JSON's own spelling
+        ("gsc.queries[2]", False),  # only two rows were shown
+        ("gsc.queries[-1]", False),
+        ("psi.field_lcp_ms", False),  # no PSI in this context
+    ],
+)
+def test_evidence_index_resolves_only_what_the_model_was_shown(ref: str, resolves: bool) -> None:
+    assert _INDEX.resolves(ref) is resolves
+
+
+def test_unresolvable_refs_are_dropped_from_a_cited_action() -> None:
+    action = PriorityAction.model_validate(
+        {**_VALID, "evidence": ["title.length", "meta.keywords", "gsc.queries[9]"]},
+        context={"evidence": _INDEX},
+    )
+    assert action.evidence == ["title.length"]
+
+
+def test_an_action_citing_only_absent_evidence_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="absent from the context"):
+        PriorityAction.model_validate(
+            {**_VALID, "evidence": ["meta.keywords", "gsc.queries[9]"]}, context={"evidence": _INDEX}
+        )
+
+
+def test_a_stored_output_revalidates_without_an_index() -> None:
+    # Reports re-read stored outputs with no context; resolution already happened.
+    action = PriorityAction.model_validate({**_VALID, "evidence": ["meta.keywords"]})
+    assert action.evidence == ["meta.keywords"]

@@ -16,9 +16,10 @@ The data layer is a commodity. What `kvseo` adds is the layer the others skip:
 **synthesis, AI-assisted prioritization, and agency-shaped reporting** — as a
 fast, local, single-command CLI.
 
-> **Status: v0.1 shipped — [on PyPI](https://pypi.org/project/kvseo/).** The
-> full pipeline (audit → advise → report) runs end-to-end and is code-reviewed,
-> type-checked, and tested throughout.
+> **Status: pre-1.0, in active development — [on PyPI](https://pypi.org/project/kvseo/).**
+> Everything planned for the first milestone is built: the full pipeline
+> (audit → advise → report) runs end-to-end and is code-reviewed, type-checked,
+> and tested throughout.
 
 ---
 
@@ -37,11 +38,30 @@ Add data sources and an LLM to go deeper:
 ```console
 $ kvseo connect psi --api-key <key>                          # PageSpeed Insights (free; raises CWV limits)
 $ kvseo connect csv export.csv --site https://example.com/   # import a GSC CSV export — no OAuth
-$ kvseo connect gsc                                          # …or connect Search Console via OAuth
+$ kvseo connect gsc --client-secrets client_secret.json      # …or connect Search Console live (see below)
 $ export ANTHROPIC_API_KEY=…                                 # bring your own LLM key (any LiteLLM provider)
 $ kvseo audit https://example.com                            # now with GSC context + an AI action list
 $ kvseo cost                                                 # what the advisor spent, by provider / model
 ```
+
+### Connecting Search Console
+
+kvseo does not ship a shared Google OAuth client yet, so a live connection uses
+your own (it stays read-only: the only scope requested is
+`webmasters.readonly`):
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), enable the
+   **Google Search Console API** and create an OAuth client of type
+   **Desktop app**.
+2. Download its JSON and run `kvseo connect gsc --client-secrets <file>`
+   (or set `KVSEO_GSC_CLIENT_ID` and `KVSEO_GSC_CLIENT_SECRET` and run
+   `kvseo connect gsc`). A browser opens for consent; kvseo then lists the
+   properties it can read.
+
+From then on every `kvseo audit` pulls the last 90 days of queries for the
+audited page from whichever of your properties covers it (`--no-gsc` skips
+that). A page outside all of them is audited as usual, without GSC context.
+The CSV import above needs none of this.
 
 ## What it does
 
@@ -105,7 +125,7 @@ Your history is one SQLite file, so keeping a copy is cheap:
 ```console
 $ kvseo db backup                        # timestamped copy into <data dir>/backups/
 $ kvseo db backup --output ~/kvseo.db    # …or wherever you want it
-$ kvseo db vacuum                        # reclaim space after pruning old audits
+$ kvseo db vacuum                        # compact the file and reclaim free space
 ```
 
 `db backup` uses SQLite's online backup API, so it is safe to run while kvseo is

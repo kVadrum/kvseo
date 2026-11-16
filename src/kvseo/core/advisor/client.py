@@ -8,8 +8,12 @@ tests exercise the parse / retry / persist machinery without a network or a key.
 
 Contract per 05 §6.3:
 
-* validate the response against the pydantic schema;
-* on failure, retry exactly once with the validation error appended;
+* validate the response against the pydantic schema, resolving every evidence
+  ref against the context the model was shown (R1);
+* on failure, retry exactly once: the model's reply goes back as the assistant
+  turn, followed by the fixed correction (``RETRY_SUFFIX``) and the one-line
+  validation error — without the error, a reply rejected for citing a check
+  that doesn't exist reads as a JSON problem and fails the same way again;
 * on a second failure, persist an ``invalid_output`` row and return it;
 * on a provider/transport error, persist a ``failed`` row and return it;
 * on success, persist the validated output plus token usage and cost.
@@ -107,6 +111,7 @@ async def prioritize(
     model = settings.advisor.model
 
     context = build_context(audit_id, engine)
+    evidence = context.evidence_index()
     user = user_message(context)
     _check_budget(user)
     complete = completion or _litellm_acompletion
@@ -147,14 +152,14 @@ async def prioritize(
         total_completion = _add(total_completion, completion_tokens)
         total_cost = _add(total_cost, _cost(response))
         try:
-            output = PrioritizationOutput.model_validate_json(last_raw or "")
+            output = PrioritizationOutput.model_validate_json(last_raw or "", context={"evidence": evidence})
         except ValidationError as exc:
             last_error = _one_line(exc)
             if attempt == 1:
                 messages = [
                     *messages,
                     {"role": "assistant", "content": last_raw or ""},
-                    {"role": "user", "content": RETRY_SUFFIX.strip()},
+                    {"role": "user", "content": f"{RETRY_SUFFIX.strip()}\n\nValidation error: {last_error}"},
                 ]
                 continue
             break  # second failure — fall through to the invalid_output record

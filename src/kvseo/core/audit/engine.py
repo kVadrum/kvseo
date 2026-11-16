@@ -1,14 +1,17 @@
 """Audit engine orchestration (04-audit-engine.md §3).
 
 Deterministic core — no LLM calls. Creates the audit_run row, fetches once,
-parses, pulls CWV concurrently, runs every registered check against the parsed
+parses, then runs the network stages concurrently (PSI for CWV, the GSC pull,
+the opt-in internal-link probe), runs every registered check against the parsed
 document, scores, and persists. The advisor (separate module) runs against the
-stored result afterwards.
+stored result afterwards, reading the GSC rows this pull persisted.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,11 +21,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from kvseo.connectors.base import ConnectorError
-from kvseo.connectors.psi import PsiConnector
+from kvseo.connectors.gsc import GscPagePull
+from kvseo.connectors.psi import PsiConnector, PsiResult
 from kvseo.core.audit.checks import REGISTRY, AuditContext, CheckFn, CheckResult
 from kvseo.core.audit.document import ParsedDocument, is_internal
 from kvseo.core.audit.fetcher import FetchError, fetch
-from kvseo.core.audit.link_checker import probe_links
+from kvseo.core.audit.link_checker import LinkStatus, probe_links
 from kvseo.core.audit.scoring import score
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
@@ -51,6 +55,9 @@ class AuditResult(BaseModel):
     page_status_code: int | None
     fetch_duration_ms: int | None
     checks: list[CheckOutcome] = Field(default_factory=list)
+    # None when no pull was attempted (GSC not connected, or --no-gsc).
+    gsc: GscPagePull | None = None
+    gsc_error: str | None = None
 
 
 async def run_audit(
@@ -61,7 +68,11 @@ async def run_audit(
     psi: PsiConnector | None = None,
     fetch_client: httpx.AsyncClient | None = None,
     check_internal_links: bool = False,
+    gsc: Callable[[str], Awaitable[GscPagePull]] | None = None,
 ) -> AuditResult:
+    """Audit ``url``. ``gsc`` pulls the page's Search Console queries given the
+    post-redirect URL; it runs beside PSI, and its failure costs the audit
+    nothing but the GSC context (02-architecture.md §10)."""
     audit_id = uuid.uuid4()
     _insert_running(db_engine, audit_id, url, keyword)
 
@@ -94,24 +105,13 @@ async def run_audit(
 
     doc = ParsedDocument(fetched.html, fetched.final_url)
 
-    psi_result = None
-    if psi is not None:
-        try:
-            # Use the post-redirect URL so CWV and the on-page checks describe
-            # the same page (PSI resolves redirects itself, but this keeps the
-            # two halves of the audit pointed at one URL).
-            psi_result = await psi.core_web_vitals(fetched.final_url)
-        except ConnectorError:
-            psi_result = None  # cwv.* checks skip; the score covers the rest
-
-    # Off by default (04 §9): up to MAX_LINKS HEAD requests against the audited
-    # host is the slowest non-PSI stage and the most likely thing to make a
-    # first audit feel broken. None (not {}) when unrequested, so the check skips.
-    link_status = None
-    if check_internal_links:
-        host = urlparse(fetched.final_url).netloc
-        internal = [link.href for link in doc.links() if is_internal(link.href, host)]
-        link_status = await probe_links(internal)
+    # Every stage below targets the post-redirect URL so CWV, GSC and the
+    # on-page checks all describe the same page.
+    psi_result, (gsc_pull, gsc_error), link_status = await asyncio.gather(
+        _cwv(psi, fetched.final_url),
+        _gsc(gsc, fetched.final_url),
+        _probe_internal(doc, fetched.final_url) if check_internal_links else _none(),
+    )
 
     ctx = AuditContext(
         fetched_url=fetched.final_url,
@@ -137,7 +137,42 @@ async def run_audit(
             )
             for r in results
         ],
+        gsc=gsc_pull,
+        gsc_error=gsc_error,
     )
+
+
+async def _cwv(psi: PsiConnector | None, url: str) -> PsiResult | None:
+    if psi is None:
+        return None
+    try:
+        return await psi.core_web_vitals(url)
+    except ConnectorError:
+        return None  # cwv.* checks skip; the score covers the rest
+
+
+async def _gsc(
+    gsc: Callable[[str], Awaitable[GscPagePull]] | None, url: str
+) -> tuple[GscPagePull | None, str | None]:
+    if gsc is None:
+        return None, None
+    try:
+        return await gsc(url), None
+    except ConnectorError as exc:
+        return None, str(exc)
+
+
+async def _probe_internal(doc: ParsedDocument, url: str) -> LinkStatus:
+    # Off by default (04 §9): up to MAX_LINKS HEAD requests against the audited
+    # host is the slowest non-PSI stage and the most likely thing to make a
+    # first audit feel broken.
+    host = urlparse(url).netloc
+    return await probe_links([link.href for link in doc.links() if is_internal(link.href, host)])
+
+
+async def _none() -> None:
+    # None (not {}) when the probe is unrequested, so internal_links.broken skips.
+    return None
 
 
 def _run_check(check: CheckFn, doc: ParsedDocument, ctx: AuditContext) -> CheckResult:

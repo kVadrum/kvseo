@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
@@ -33,6 +33,10 @@ _BASE = "https://www.googleapis.com/webmasters/v3"
 _TIMEOUT = httpx.Timeout(30.0)
 _DEFAULT_FRESHNESS = timedelta(days=1)
 _MAX_CONCURRENCY = 10  # self-imposed, leaves headroom under GSC's 30 QPS cap
+# Search Console finalises a day's data two to three days after it ends; ending
+# the window earlier would compare a partial day against full ones.
+_DATA_LAG = timedelta(days=3)
+PAGE_WINDOW_DAYS = 90  # 02-architecture.md §7: last-90-day query data for the URL
 
 
 class GscSite(BaseModel):
@@ -119,6 +123,35 @@ def recent_queries(session: Session, page: str, *, limit: int) -> list[GscQueryR
         .limit(limit)
     ).all()
     return [_orm_to_row(r) for r in rows]
+
+
+def property_for(url: str, sites: list[GscSite]) -> str | None:
+    """The connected property that covers ``url``, most specific first.
+
+    Search Console has two property kinds: URL-prefix (``https://kemek.net/``,
+    covers exactly the URLs under that prefix, scheme included) and domain
+    (``sc-domain:kemek.net``, covers every scheme and subdomain). The longest
+    covering prefix wins, then a domain property; an unverified grant can't
+    query either, so it never matches.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    usable = [s for s in sites if s.permission_level != "siteUnverifiedUser"]
+    prefixes = [s.site_url for s in usable if not s.site_url.startswith("sc-domain:") and url.startswith(s.site_url)]
+    if prefixes:
+        return max(prefixes, key=len)
+    for site in usable:
+        if site.site_url.startswith("sc-domain:"):
+            domain = site.site_url.removeprefix("sc-domain:").lower()
+            if host == domain or host.endswith("." + domain):
+                return site.site_url
+    return None
+
+
+class GscPagePull(BaseModel):
+    """What an audit's GSC pull found for one page."""
+
+    property: str | None  # None: no connected property covers the page
+    queries: int
 
 
 class GscConnector:
@@ -212,6 +245,20 @@ class GscConnector:
         ]
         self._persist(site, rows)
         return rows
+
+    async def pull_page(self, url: str, *, today: date | None = None) -> GscPagePull:
+        """Pull and persist the page's last-90-day queries, if a property covers it.
+
+        Auditing a page outside every connected property (a competitor, a
+        client not yet granted) is ordinary use, so it is a result, not an error.
+        """
+        site = property_for(url, await self.sites())
+        if site is None:
+            return GscPagePull(property=None, queries=0)
+        end = (today or date.today()) - _DATA_LAG
+        start = end - timedelta(days=PAGE_WINDOW_DAYS - 1)
+        rows = await self.queries_for_url(site, url, start, end)
+        return GscPagePull(property=site, queries=len(rows))
 
     async def health_check(self) -> bool:
         """Confirm the token works by listing sites."""

@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -22,6 +23,9 @@ from kvseo.cli._util import open_db
 from kvseo.config import paths
 from kvseo.config.secrets import get_secret
 from kvseo.config.settings import Settings
+from kvseo.connectors.base import ConnectorAuthError
+from kvseo.connectors.gsc import GscConnector, GscPagePull
+from kvseo.connectors.gsc_auth import CLIENT_CONFIG_KEY, REFRESH_TOKEN_KEY, client_config, refresh_access_token
 from kvseo.connectors.psi import PsiConnector
 from kvseo.core.advisor.client import AdvisorRun, prioritize
 from kvseo.core.advisor.context import AdvisorError
@@ -40,6 +44,9 @@ def audit(
     ] = None,
     no_cwv: Annotated[
         bool, typer.Option("--no-cwv", help="Skip the PageSpeed Insights / Core Web Vitals pull.")
+    ] = False,
+    no_gsc: Annotated[
+        bool, typer.Option("--no-gsc", help="Skip the Search Console pull even if GSC is connected.")
     ] = False,
     no_advisor: Annotated[
         bool, typer.Option("--no-advisor", help="Skip the LLM advisor (raw audit only).")
@@ -76,8 +83,12 @@ def audit(
             keyword=keyword,
             psi=psi,
             check_internal_links=check_internal_links,
+            gsc=None if no_gsc else _gsc_pull(engine),
         )
     )
+    if result.gsc_error:
+        # Visible but not fatal, like the advisor: stderr is safe under --json.
+        typer.secho(f"GSC skipped — {result.gsc_error}", fg=typer.colors.YELLOW, err=True)
 
     advisor: AdvisorRun | None = None
     advisor_error: str | None = None
@@ -155,6 +166,30 @@ def _write_file(content: str, output: Path | None, audit_id: uuid.UUID, ext: str
     return path
 
 
+def _gsc_pull(engine: Engine) -> Callable[[str], Awaitable[GscPagePull]] | None:
+    """The audit's GSC pull, or None when GSC was never connected.
+
+    Not connected is the normal state for a first audit, so it is no pull at
+    all rather than a pull that fails. A grant stored before the client config
+    was (kvseo < 0.11) falls back to the environment's client, and says so if
+    there is none.
+    """
+    refresh_token = get_secret(REFRESH_TOKEN_KEY)
+    if not refresh_token:
+        return None
+    stored = get_secret(CLIENT_CONFIG_KEY)
+
+    async def pull(url: str) -> GscPagePull:
+        try:
+            config = json.loads(stored) if stored else client_config()
+        except ValueError as exc:
+            raise ConnectorAuthError("the stored GSC client config is unreadable — re-run `kvseo connect gsc`") from exc
+        token = await refresh_access_token(refresh_token, config)
+        return await GscConnector(access_token=token, engine=engine).pull_page(url)
+
+    return pull
+
+
 def _psi_key() -> str | None:
     return get_secret("psi:api_key") or os.environ.get("PSI_API_KEY")
 
@@ -195,6 +230,12 @@ def _print_summary(result: AuditResult, advisor: AdvisorRun | None, written: lis
             f"({top.expected_impact} impact, {top.effort} effort)",
             fg=typer.colors.CYAN,
         )
+
+    if result.gsc is not None:
+        if result.gsc.property is None:
+            typer.echo("\n   GSC: no connected property covers this URL")
+        else:
+            typer.echo(f"\n   GSC: {result.gsc.queries} queries over 90 days ({result.gsc.property})")
 
     for path in written:
         typer.echo(f"\n   Report: {path}")

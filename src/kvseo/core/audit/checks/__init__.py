@@ -2,10 +2,9 @@
 
 Explicit registry, not import-magic: a check runs iff it's listed here. Adding
 a check is appending to its category module's ``CHECKS`` (or a new module wired
-in below). v0.1 ships the on-page surface; deferred (registry-ready): the
-info-level extras (headings.keyword, images.dimensions, links.external_rel),
-``schema.valid`` (schema.org validation), and ``internal_links.broken`` (network
-HEAD checks, default-off per §9).
+in below). Every check in the 04 §2 table is registered. Checks never touch the
+network: ``internal_links.broken`` reads statuses the engine probed beforehand
+(opt-in, §9), and skips when nothing was probed.
 """
 
 from __future__ import annotations
