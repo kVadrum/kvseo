@@ -14,7 +14,7 @@ from kvseo.connectors.base import ConnectorAuthError
 from kvseo.connectors.gsc import GscPagePull
 from kvseo.connectors.psi import PsiConnector
 from kvseo.core.audit.checks import REGISTRY
-from kvseo.core.audit.engine import run_audit
+from kvseo.core.audit.engine import SourcePull, run_audit
 from kvseo.storage.db import get_engine, migrate
 from kvseo.storage.models import AuditCheck as AuditCheckORM
 from kvseo.storage.models import AuditRun as AuditRunORM
@@ -170,3 +170,25 @@ async def test_no_gsc_pull_leaves_both_fields_empty(tmp_path: Path) -> None:
     migrate(db)
     result = await run_audit(URL, db_engine=get_engine(db), fetch_client=_fetch_client(), psi=None)
     assert (result.gsc, result.gsc_error) == (None, None)
+
+
+async def test_source_pulls_run_and_fail_independently(tmp_path: Path) -> None:
+    db = tmp_path / "kvseo.db"
+    migrate(db)
+    asked: list[str] = []
+
+    async def serpbear(url: str) -> SourcePull:
+        asked.append(url)
+        return SourcePull(source="serpbear", rows=3, detail="3 tracked keywords for example.com")
+
+    async def dataforseo(url: str) -> SourcePull:
+        raise ConnectorAuthError("DataForSEO 40200: Insufficient funds.")
+
+    result = await run_audit(
+        URL, db_engine=get_engine(db), fetch_client=_fetch_client(), psi=None,
+        sources={"serpbear": serpbear, "dataforseo": dataforseo},
+    )
+    assert result.status == "complete"
+    assert [p.source for p in result.sources] == ["serpbear"]
+    assert result.source_errors == {"dataforseo": "DataForSEO 40200: Insufficient funds."}
+    assert asked == [URL]

@@ -30,7 +30,7 @@ _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 # migrate() is careful to defer; `test_known_revisions_match_alembic` pins the
 # tuple against Alembic's own ScriptDirectory, so adding a migration without
 # updating it fails CI rather than shipping a wrong answer.
-KNOWN_REVISIONS = ("0001",)
+KNOWN_REVISIONS = ("0001", "0002")
 HEAD_REVISION = KNOWN_REVISIONS[-1]
 
 

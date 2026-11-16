@@ -5,14 +5,15 @@ normalized to the *same* pydantic model an API connector produces and written
 to that connector's table — so downstream code (the advisor) can't tell a
 CSV-imported row from a live-fetched one.
 
-v0.1 supports one schema, ``queries`` → :class:`GscQueryRow` → ``gsc_queries``.
-That is the load-bearing escape hatch: a Search-Console export feeds the advisor
-exactly like the live GSC connector does, without the OAuth dance. The
-``keywords`` and ``rankings`` schemas in the spec target the DataForSEO /
-SerpBear tables, which land with those connectors in v0.2 (03 §4-6); they are
-deliberately not wired here yet — ``import_csv`` rejects them with a clear error
-rather than pretending. Adding them in v0.2 is purely a new branch + target
-table.
+Three schemas, each written through its API connector's own write path:
+
+* ``queries`` → :class:`GscQueryRow` → ``gsc_queries``: a Search Console export
+  feeds the advisor exactly like the live GSC connector, without the OAuth dance.
+* ``rankings`` → :class:`SerpBearRanking` → ``serpbear_rankings``: any rank
+  tracker's export, read by the advisor like a SerpBear pull.
+* ``keywords`` → :class:`DfsKeywordVolume` → ``dataforseo_data`` with
+  ``source='csv'`` (03 §7): a Keyword Planner or third-party volume export.
+  The source column keeps it from reading as DataForSEO's own data.
 
 Import is transactional: per-row validation errors are collected, and if more
 than ``max_failure_ratio`` of the rows fail (a wrong-file / wrong-schema
@@ -23,7 +24,7 @@ are reported back in :class:`ImportResult`.
 from __future__ import annotations
 
 import csv
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
@@ -32,10 +33,13 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.engine import Engine
 
 from kvseo.connectors.base import ConnectorMeta
+from kvseo.connectors.dataforseo import US, DfsKeywordVolume, persist_keyword_volumes
 from kvseo.connectors.gsc import GscQueryRow, persist_gsc_rows
+from kvseo.connectors.serpbear import SerpBearRanking, persist_rankings, serpbear_domain
 
-ImportSchema = Literal["queries"]
-_SUPPORTED: tuple[str, ...] = ("queries",)
+ImportSchema = Literal["queries", "rankings", "keywords"]
+_SUPPORTED: tuple[str, ...] = ("queries", "rankings", "keywords")
+_TARGET_TABLE = {"queries": "gsc_queries", "rankings": "serpbear_rankings", "keywords": "dataforseo_data"}
 
 # Header auto-mapping for the ``queries`` schema. Keys are our canonical
 # GscQueryRow fields; values are header spellings we accept (lower-cased,
@@ -51,6 +55,21 @@ _QUERY_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "ctr": ("ctr", "url ctr", "click through rate", "click-through rate"),
     "position": ("position", "average position", "avg position", "avg. pos", "avg pos", "pos"),
 }
+_RANKING_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "keyword": ("keyword", "keywords", "query", "search term", "term"),
+    "position": ("position", "rank", "ranking", "current position", "google position", "pos"),
+    "url": ("url", "ranking url", "landing page", "page", "address"),
+    "location": ("location", "country", "market"),
+    "device": ("device",),
+}
+_KEYWORD_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "keyword": ("keyword", "keywords", "query", "search term", "term"),
+    "search_volume": ("search volume", "search_volume", "volume", "avg. monthly searches", "monthly searches", "sv"),
+    "cpc": ("cpc", "cpc (usd)", "cost per click"),
+    # Keyword Planner exports both; the indexed value (0-100) is the numeric one.
+    "competition": ("competition (indexed value)", "competition index", "competition"),
+}
+_UNRANKED = {"", "0", "-", "—", "n/a", "not ranked", ">100", "100+", "> 100"}
 
 
 class ImportRowError(BaseModel):
@@ -64,6 +83,7 @@ class ImportResult(BaseModel):
     """The outcome of a CSV import: what was read, what committed, what failed."""
 
     schema_name: str
+    table: str
     path: str
     total_rows: int
     imported: int
@@ -87,7 +107,7 @@ class CsvConnector:
     before the whole import is treated as a wrong-file mistake and rolled back.
     """
 
-    meta = ConnectorMeta(name="csv", version="0.1.0", capabilities=["queries"])
+    meta = ConnectorMeta(name="csv", version="0.2.0", capabilities=["queries", "rankings", "keywords"])
 
     def __init__(self, *, engine: Engine | None = None, max_failure_ratio: float = 0.5) -> None:
         self._engine = engine
@@ -112,26 +132,45 @@ class CsvConnector:
 
         ``mapping`` maps our canonical field names to the CSV's header names and
         overrides auto-detection. ``site`` is the GSC property the rows belong to
-        (``gsc_queries.site_origin``). ``default_page`` fills the page column for
-        query-only exports that don't carry a page. ``date_start``/``date_end``
-        set the row date range (default: today), since UI exports drop it.
+        (``queries``) or the domain they rank for (``rankings``); keyword volume
+        is market-level, so ``keywords`` ignores it. ``default_page`` fills the
+        page column for query-only exports. ``date_start``/``date_end`` set the
+        row date range for ``queries``; ``date_end`` dates a ``rankings`` import
+        (default: today), since exports drop it.
         """
         if schema not in _SUPPORTED:
-            raise CsvImportError(
-                f"schema '{schema}' is not importable in v0.1 — only {_SUPPORTED} is "
-                "supported. The 'keywords' and 'rankings' schemas land with the "
-                "DataForSEO / SerpBear connectors in v0.2."
+            raise CsvImportError(f"schema '{schema}' is not importable — use one of {_SUPPORTED}.")
+        rows: Sequence[object]
+        if schema == "queries":
+            rows, errors, total = self._read_queries(
+                path, mapping, default_page=default_page, date_start=date_start, date_end=date_end
             )
-        rows, errors, total = self._read_queries(
-            path, mapping, default_page=default_page, date_start=date_start, date_end=date_end
-        )
+        elif schema == "rankings":
+            checked = (date_end or _today()).isoformat()
+            domain = serpbear_domain(site)
+            rows, errors, total = self._read(
+                path, mapping, _RANKING_HEADER_ALIASES, ("keyword", "position"),
+                lambda raw, cols: _row_to_ranking(raw, cols, domain, checked),
+            )
+        else:
+            fetched_at = datetime.now(UTC)
+            rows, errors, total = self._read(
+                path, mapping, _KEYWORD_HEADER_ALIASES, ("keyword", "search_volume"),
+                lambda raw, cols: _row_to_volume(raw, cols, fetched_at),
+            )
 
         committed = self._should_commit(len(errors), total)
-        if committed and rows:
-            self._persist(site, rows)
+        if committed and rows and self._engine is not None:
+            if schema == "queries":
+                persist_gsc_rows(self._engine, site, list(rows))  # type: ignore[arg-type]
+            elif schema == "rankings":
+                persist_rankings(self._engine, list(rows))  # type: ignore[arg-type]
+            else:
+                persist_keyword_volumes(self._engine, list(rows), cost=None, source="csv")  # type: ignore[arg-type]
 
         return ImportResult(
             schema_name=schema,
+            table=_TARGET_TABLE[schema],
             path=str(path),
             total_rows=total,
             imported=len(rows) if committed else 0,
@@ -169,6 +208,33 @@ class CsvConnector:
                 total += 1
                 try:
                     rows.append(self._row_to_query(raw, colmap, default_page, start, end))
+                except (ValueError, ValidationError) as exc:
+                    errors.append(ImportRowError(row=line_no, error=_one_line(exc)))
+        return rows, errors, total
+
+    def _read[R](
+        self,
+        path: Path,
+        mapping: dict[str, str] | None,
+        aliases: dict[str, tuple[str, ...]],
+        required: tuple[str, ...],
+        to_row: Callable[[dict[str, str], dict[str, str]], R],
+    ) -> tuple[list[R], list[ImportRowError], int]:
+        """Read every row of ``path`` through ``to_row``, collecting per-row errors."""
+        if not path.exists():
+            raise CsvImportError(f"CSV not found: {path}")
+        with path.open("r", encoding="utf-8-sig", newline="") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames is None:
+                raise CsvImportError(f"CSV has no header row: {path}")
+            cols = _resolve(reader.fieldnames, mapping, aliases, required)
+            rows: list[R] = []
+            errors: list[ImportRowError] = []
+            total = 0
+            for line_no, raw in enumerate(reader, start=2):  # line 1 is the header
+                total += 1
+                try:
+                    rows.append(to_row(raw, cols))
                 except (ValueError, ValidationError) as exc:
                     errors.append(ImportRowError(row=line_no, error=_one_line(exc)))
         return rows, errors, total
@@ -235,12 +301,86 @@ class CsvConnector:
             return False
         return (failed / total) <= self._max_failure_ratio
 
-    # --- Persistence ------------------------------------------------------
 
-    def _persist(self, site: str, rows: list[GscQueryRow]) -> None:
-        if self._engine is None:
-            return
-        persist_gsc_rows(self._engine, site, rows)  # shared GscQuery write path
+
+def _resolve(
+    fieldnames: Sequence[str],
+    mapping: dict[str, str] | None,
+    aliases: dict[str, tuple[str, ...]],
+    required: tuple[str, ...],
+) -> dict[str, str]:
+    """Map canonical fields to CSV headers: an explicit ``mapping`` wins, then the
+    first alias present. Optional fields may stay unmapped."""
+    present = {name.strip().lower(): name for name in fieldnames}
+    resolved: dict[str, str] = {}
+    for field_name, names in aliases.items():
+        if mapping and field_name in mapping:
+            if mapping[field_name] not in fieldnames:
+                raise CsvImportError(f"mapped column '{mapping[field_name]}' for '{field_name}' not in CSV header")
+            resolved[field_name] = mapping[field_name]
+            continue
+        found = next((present[a] for a in names if a in present), None)
+        if found is not None:
+            resolved[field_name] = found
+    missing = [f for f in required if f not in resolved]
+    if missing:
+        raise CsvImportError(
+            f"could not map required column(s) {missing} from header {list(fieldnames)}. "
+            "Pass --map field=header to map explicitly."
+        )
+    return resolved
+
+
+def _cell(raw: dict[str, str], cols: dict[str, str], name: str) -> str:
+    return (raw.get(cols[name]) or "").strip() if name in cols else ""
+
+
+def _row_to_ranking(raw: dict[str, str], cols: dict[str, str], domain: str, checked: str) -> SerpBearRanking:
+    keyword = _cell(raw, cols, "keyword")
+    if not keyword:
+        raise ValueError("empty keyword")
+    position_cell = _cell(raw, cols, "position")
+    position = None if position_cell.lower() in _UNRANKED else int(float(position_cell))
+    if position is not None and position < 1:
+        raise ValueError(f"position {position} is below 1")
+    return SerpBearRanking(
+        keyword=keyword,
+        domain=domain,
+        location=_cell(raw, cols, "location") or None,
+        device=_cell(raw, cols, "device").lower() or None,
+        position=position,
+        url=_cell(raw, cols, "url") or None,
+        checked_at=checked,
+        history=[],
+    )
+
+
+def _row_to_volume(raw: dict[str, str], cols: dict[str, str], fetched_at: datetime) -> DfsKeywordVolume:
+    keyword = _cell(raw, cols, "keyword")
+    if not keyword:
+        raise ValueError("empty keyword")
+    volume = _cell(raw, cols, "search_volume")
+    cpc = _cell(raw, cols, "cpc").lstrip("$")
+    return DfsKeywordVolume(
+        keyword=keyword,
+        location_code=US,
+        language_code="en",
+        search_volume=_int(volume) if volume else None,
+        cpc_usd=_float(cpc) if cpc else None,
+        competition=_competition(_cell(raw, cols, "competition")),
+        monthly_searches=[],
+        fetched_at=fetched_at,
+    )
+
+
+def _competition(value: str) -> float | None:
+    """A 0-1 fraction from a 0-1 or 0-100 number. Text levels ('Low', 'High')
+    carry no number to keep, so they read as unknown rather than a guess."""
+    try:
+        number = float(value.replace(",", ""))
+    except ValueError:
+        return None
+    return number / 100 if number > 1 else number
 
 
 def _today() -> date:

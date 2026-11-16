@@ -6,8 +6,10 @@ Conventions (data-model §1): UUID primary keys stored as 16 raw bytes
 constraints. This module deliberately omits ``from __future__ import
 annotations`` — SQLAlchemy resolves ``Mapped[...]`` annotations at mapping time.
 
-v0.1 tables only. The SerpBear / OpenSEO / DataForSEO connector tables (§3.7)
-land with those connectors in v0.2, alongside their own migration.
+The v0.2 connector tables (§3.7) arrived with their connectors in migration
+0002. SerpBear has a typed table; OpenSEO and DataForSEO share the generic
+``(resource_type, resource_key, payload)`` shape §3.7 chose for providers whose
+resource set is large, re-validated by pydantic on read.
 """
 
 import uuid
@@ -215,6 +217,58 @@ class PsiResult(Base):
     fetched_at: Mapped[str] = mapped_column(String, nullable=False, server_default=text(_NOW))
 
     __table_args__ = (Index("idx_psi_url_time", "url", "strategy", "fetched_at"),)
+
+
+class SerpBearRanking(Base):
+    """One tracked keyword's ranking from a user-hosted SerpBear (§3.7)."""
+
+    __tablename__ = "serpbear_rankings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidBytes(), primary_key=True, default=uuid.uuid4)
+    domain: Mapped[str] = mapped_column(String, nullable=False)
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    location: Mapped[str | None] = mapped_column(String)  # SerpBear country code, e.g. 'US'
+    device: Mapped[str | None] = mapped_column(String)
+    position: Mapped[int | None] = mapped_column(Integer)  # None: not in the tracked depth
+    url: Mapped[str | None] = mapped_column(Text)
+    history: Mapped[list[Any] | None] = mapped_column(JSON)  # [{date, position}], oldest first
+    checked_at: Mapped[str] = mapped_column(String, nullable=False)
+    fetched_at: Mapped[str] = mapped_column(String, nullable=False, server_default=text(_NOW))
+
+    __table_args__ = (Index("idx_serpbear_domain_keyword", "domain", "keyword", "fetched_at"),)
+
+
+class OpenSeoData(Base):
+    """A cached OpenSEO tool result, keyed by resource (§3.7)."""
+
+    __tablename__ = "openseo_data"
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidBytes(), primary_key=True, default=uuid.uuid4)
+    resource_type: Mapped[str] = mapped_column(String, nullable=False)  # keyword_volume|serp|domain
+    resource_key: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[Any] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[str] = mapped_column(String, nullable=False, server_default=text(_NOW))
+
+    __table_args__ = (Index("idx_openseo_lookup", "resource_type", "resource_key", "fetched_at"),)
+
+
+class DataForSeoData(Base):
+    """A cached DataForSEO result plus what DataForSEO billed for it (§3.7)."""
+
+    __tablename__ = "dataforseo_data"
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidBytes(), primary_key=True, default=uuid.uuid4)
+    resource_type: Mapped[str] = mapped_column(String, nullable=False)  # keyword_volume|keyword_ideas|serp
+    resource_key: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[Any] = mapped_column(JSON, nullable=False)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Float)
+    # 'api' for a DataForSEO call; 'csv' for a `connect csv --schema keywords`
+    # import, which lands here in the same shape (03 §7) but must not read as
+    # DataForSEO's data.
+    source: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'api'"))
+    fetched_at: Mapped[str] = mapped_column(String, nullable=False, server_default=text(_NOW))
+
+    __table_args__ = (Index("idx_dataforseo_lookup", "resource_type", "resource_key", "fetched_at"),)
 
 
 class Report(Base):

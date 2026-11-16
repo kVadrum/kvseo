@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from kvseo.cli import app
+from kvseo.storage.db import HEAD_REVISION
 
 runner = CliRunner()
 
@@ -38,7 +39,7 @@ def test_init_creates_config_and_db(
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
     finally:
         conn.close()
-    assert version is not None and version[0] == "0001"
+    assert version is not None and version[0] == HEAD_REVISION
     assert "audit_runs" in tables
     assert journal_mode[0].lower() == "wal"
 

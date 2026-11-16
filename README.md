@@ -63,6 +63,32 @@ audited page from whichever of your properties covers it (`--no-gsc` skips
 that). A page outside all of them is audited as usual, without GSC context.
 The CSV import above needs none of this.
 
+### Rankings and keyword data
+
+Three more sources feed the advisor, each optional and each read-only:
+
+```console
+$ kvseo connect serpbear --url https://serpbear.example.com --token <APIKEY>   # your SerpBear's tracked rankings
+$ kvseo connect dataforseo --login <login> --password <password>               # your DataForSEO account
+$ kvseo connect openseo --token oseo_…                                         # OpenSEO, hosted or self-hosted (--url)
+$ kvseo connectors                                                             # what is connected
+```
+
+With [SerpBear](https://github.com/towfiqi/serpbear) connected, an audit reads
+the rankings it already tracks for the audited domain — the page's own keywords
+and the `--keyword` target. With `--keyword`, an audit also fetches that
+keyword's monthly search volume, CPC and competition from DataForSEO, or from
+[OpenSEO](https://github.com/every-app/open-seo) when only that is connected
+(OpenSEO is built on DataForSEO, so kvseo never asks both). DataForSEO bills
+per call and OpenSEO spends credits, so keyword data is cached for a week.
+`connect` checks the credentials before storing them; they live in your OS
+keyring, or come from `SERPBEAR_URL` / `SERPBEAR_API_KEY`, `DATAFORSEO_LOGIN` /
+`DATAFORSEO_PASSWORD`, `OPENSEO_API_KEY` / `OPENSEO_URL`.
+
+No account for any of them? `kvseo connect csv` also imports a rank tracker's
+export (`--schema rankings`) or a keyword-volume export such as Google Ads
+Keyword Planner's (`--schema keywords`).
+
 ## What it does
 
 - **On-page audit** — 24 checks across title, meta, headings, content, schema,
@@ -74,6 +100,8 @@ The CSV import above needs none of this.
 - **Search Console context** — real query / click / impression / position data
   per URL, via OAuth **or** a plain CSV export (the no-API escape hatch).
   Striking-distance queries (positions 5–20) get their own report section.
+- **Rankings and demand** — tracked positions from SerpBear, and search volume
+  for your target keyword from DataForSEO or OpenSEO (or CSV exports of either).
 - **AI advisor** — a prioritized "what to do next" list where every
   recommendation is traceable to a specific finding. **Bring your own LLM key**
   (Anthropic, OpenAI, Gemini, or a local Ollama — anything LiteLLM speaks to).

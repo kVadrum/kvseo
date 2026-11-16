@@ -15,7 +15,10 @@ from sqlalchemy.orm import Session
 
 from kvseo.connectors.base import Connector
 from kvseo.connectors.csv import CsvConnector, CsvImportError
+from kvseo.connectors.dataforseo import latest_keyword_volume
+from kvseo.connectors.serpbear import rankings_for_page
 from kvseo.storage.db import get_engine, migrate
+from kvseo.storage.models import DataForSeoData
 from kvseo.storage.models import GscQuery as GscQueryORM
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "csv"
@@ -174,10 +177,56 @@ async def test_bad_mapping_target_raises(tmp_path: Path) -> None:
 async def test_unsupported_schema_rejected(tmp_path: Path) -> None:
     conn = CsvConnector(engine=_engine(tmp_path))
     with pytest.raises(CsvImportError, match="not importable"):
-        await conn.import_csv(FIXTURES / "queries_happy.csv", schema="keywords", site=SITE)  # type: ignore[arg-type]
+        await conn.import_csv(FIXTURES / "queries_happy.csv", schema="pages", site=SITE)  # type: ignore[arg-type]
 
 
 async def test_missing_file_raises(tmp_path: Path) -> None:
     conn = CsvConnector(engine=_engine(tmp_path))
     with pytest.raises(CsvImportError, match="not found"):
         await conn.import_csv(tmp_path / "nope.csv", site=SITE)
+
+
+async def test_rankings_import_reads_like_a_serpbear_pull(tmp_path: Path) -> None:
+    """A generic rank-tracker export lands in serpbear_rankings through the same
+    write path, so the advisor's page lookup finds it."""
+    csv_path = tmp_path / "ranks.csv"
+    csv_path.write_text(
+        "Keyword,Rank,Ranking URL,Country\n"
+        "ops consulting,14,https://www.kemek.net/services/,US\n"
+        "kemek network,1,https://kemek.net/,US\n"
+        "west virginia ops,>100,,US\n"
+        ",3,https://kemek.net/x,US\n",
+        encoding="utf-8",
+    )
+    engine = _engine(tmp_path)
+    result = await CsvConnector(engine=engine).import_csv(csv_path, schema="rankings", site="https://kemek.net/")
+
+    assert (result.table, result.imported, result.failed) == ("serpbear_rankings", 3, 1)
+    with Session(engine) as session:
+        on_page = rankings_for_page(session, "https://kemek.net/services", None, limit=25)
+        assert [(r.keyword, r.position, r.domain) for r in on_page] == [("ops consulting", 14, "kemek.net")]
+        unranked = rankings_for_page(session, "https://kemek.net/services", "west virginia ops", limit=25)
+        assert ("west virginia ops", None) in [(r.keyword, r.position) for r in unranked]
+
+
+async def test_keywords_import_is_marked_csv_not_dataforseo(tmp_path: Path) -> None:
+    """A Keyword Planner export: the indexed competition column wins over the
+    text one, and the rows say they came from a CSV."""
+    csv_path = tmp_path / "planner.csv"
+    csv_path.write_text(
+        "Keyword,Avg. monthly searches,Competition,Competition (indexed value),CPC (USD)\n"
+        "ops consulting,880,Low,23,$9.50\n"
+        "seo audit,\"2,900\",High,71,6.1\n",
+        encoding="utf-8",
+    )
+    engine = _engine(tmp_path)
+    result = await CsvConnector(engine=engine).import_csv(csv_path, schema="keywords", site=SITE)
+
+    assert (result.table, result.imported) == ("dataforseo_data", 2)
+    with Session(engine) as session:
+        stored = latest_keyword_volume(session, "seo audit")
+        assert stored is not None
+        volume, source = stored
+        assert (volume.search_volume, volume.competition, volume.cpc_usd, source) == (2900, 0.71, 6.1, "csv")
+        costs = session.scalars(select(DataForSeoData.estimated_cost_usd)).all()
+        assert costs == [None, None]  # nothing was billed

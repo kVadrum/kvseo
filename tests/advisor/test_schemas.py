@@ -64,7 +64,9 @@ def test_empty_output_is_valid() -> None:
     assert out.schema_version == ADVISOR_OUTPUT_SCHEMA_VERSION
 
 
-_INDEX = EvidenceIndex(check_ids=frozenset({"title.length", "cwv.lcp"}), gsc_rows=2, has_psi=False)
+_INDEX = EvidenceIndex(
+    check_ids=frozenset({"title.length", "cwv.lcp"}), rows={"gsc_queries": 2, "serpbear_rankings": 1}, has_psi=False
+)
 
 
 @pytest.mark.parametrize(

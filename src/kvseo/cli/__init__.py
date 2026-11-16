@@ -12,7 +12,7 @@ from typing import Annotated
 import typer
 
 from kvseo import __version__
-from kvseo.cli import advisor, audit, config, connect, cost, db, init, report
+from kvseo.cli import advisor, audit, config, connect, connectors, cost, db, init, report
 
 app = typer.Typer(
     name="kvseo",
@@ -50,6 +50,7 @@ app.command()(init.init)
 app.command()(audit.audit)
 app.command()(report.report)
 app.command()(cost.cost)
+app.command()(connectors.connectors)
 # Sub-command groups.
 app.add_typer(connect.app, name="connect")
 app.add_typer(config.app, name="config")

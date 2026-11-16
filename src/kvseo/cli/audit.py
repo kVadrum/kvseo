@@ -19,6 +19,7 @@ from typing import Annotated
 import typer
 from sqlalchemy.engine import Engine
 
+from kvseo.cli import _sources
 from kvseo.cli._util import open_db
 from kvseo.config import paths
 from kvseo.config.secrets import get_secret
@@ -84,11 +85,14 @@ def audit(
             psi=psi,
             check_internal_links=check_internal_links,
             gsc=None if no_gsc else _gsc_pull(engine),
+            sources=_sources.audit_pulls(engine, keyword),
         )
     )
+    # Visible but not fatal, like the advisor: stderr is safe under --json.
     if result.gsc_error:
-        # Visible but not fatal, like the advisor: stderr is safe under --json.
         typer.secho(f"GSC skipped — {result.gsc_error}", fg=typer.colors.YELLOW, err=True)
+    for source, error in result.source_errors.items():
+        typer.secho(f"{source} skipped — {error}", fg=typer.colors.YELLOW, err=True)
 
     advisor: AdvisorRun | None = None
     advisor_error: str | None = None
@@ -236,6 +240,8 @@ def _print_summary(result: AuditResult, advisor: AdvisorRun | None, written: lis
             typer.echo("\n   GSC: no connected property covers this URL")
         else:
             typer.echo(f"\n   GSC: {result.gsc.queries} queries over 90 days ({result.gsc.property})")
+    for pull in result.sources:
+        typer.echo(f"   {pull.source}: {pull.detail}")
 
     for path in written:
         typer.echo(f"\n   Report: {path}")

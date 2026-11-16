@@ -18,6 +18,7 @@ are baked in:
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -29,24 +30,30 @@ Impact = Literal["high", "medium", "low"]
 Effort = Literal["low", "medium", "high"]
 Category = Literal["on_page", "content", "technical", "performance"]
 
+_ROW_REF = re.compile(r"([a-z_.]+)\[(\d+)\]")
 # The prompt teaches `gsc.queries[3]`; the context JSON names the list `gsc_queries`.
-_GSC_REF = re.compile(r"gsc(?:\.|_)queries\[(\d+)\]")
+_ALIASES = {"gsc.queries": "gsc_queries"}
 
 
 @dataclass(frozen=True)
 class EvidenceIndex:
-    """What an evidence ref may point at: the context the model was shown."""
+    """What an evidence ref may point at: the context the model was shown.
+
+    ``rows`` maps each row-list in the context to its length, so ``name[i]``
+    resolves only for a row the model actually saw.
+    """
 
     check_ids: frozenset[str]
-    gsc_rows: int
+    rows: Mapping[str, int]
     has_psi: bool
 
     def resolves(self, ref: str) -> bool:
         ref = ref.strip()
         if ref in self.check_ids:
             return True
-        if match := _GSC_REF.fullmatch(ref):
-            return int(match.group(1)) < self.gsc_rows
+        if match := _ROW_REF.fullmatch(ref):
+            name = _ALIASES.get(match.group(1), match.group(1))
+            return int(match.group(2)) < self.rows.get(name, 0)
         return self.has_psi and (ref == "psi" or ref.startswith("psi."))
 
 

@@ -2,16 +2,18 @@
 
 Deterministic core — no LLM calls. Creates the audit_run row, fetches once,
 parses, then runs the network stages concurrently (PSI for CWV, the GSC pull,
-the opt-in internal-link probe), runs every registered check against the parsed
-document, scores, and persists. The advisor (separate module) runs against the
-stored result afterwards, reading the GSC rows this pull persisted.
+the v0.2 source pulls — SerpBear rankings, DataForSEO / OpenSEO keyword
+metrics — and the opt-in internal-link probe), runs every registered check
+against the parsed document, scores, and persists. The advisor (separate
+module) runs against the stored result afterwards, reading the connector rows
+these pulls persisted.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -41,6 +43,14 @@ class CheckOutcome(BaseModel):
     message: str
 
 
+class SourcePull(BaseModel):
+    """What one v0.2 source pull stored for this audit."""
+
+    source: str  # 'serpbear' | 'dataforseo' | 'openseo'
+    rows: int
+    detail: str
+
+
 class AuditResult(BaseModel):
     """The §4.1 audit_run shape plus its per-check outcomes."""
 
@@ -58,6 +68,9 @@ class AuditResult(BaseModel):
     # None when no pull was attempted (GSC not connected, or --no-gsc).
     gsc: GscPagePull | None = None
     gsc_error: str | None = None
+    # Only the sources that were connected and relevant appear, in either map.
+    sources: list[SourcePull] = Field(default_factory=list)
+    source_errors: dict[str, str] = Field(default_factory=dict)
 
 
 async def run_audit(
@@ -69,10 +82,11 @@ async def run_audit(
     fetch_client: httpx.AsyncClient | None = None,
     check_internal_links: bool = False,
     gsc: Callable[[str], Awaitable[GscPagePull]] | None = None,
+    sources: Mapping[str, Callable[[str], Awaitable[SourcePull]]] | None = None,
 ) -> AuditResult:
-    """Audit ``url``. ``gsc`` pulls the page's Search Console queries given the
-    post-redirect URL; it runs beside PSI, and its failure costs the audit
-    nothing but the GSC context (02-architecture.md §10)."""
+    """Audit ``url``. ``gsc`` and each of ``sources`` pull connector data for the
+    post-redirect URL beside PSI; a failure costs the audit nothing but that
+    source's context (02-architecture.md §10)."""
     audit_id = uuid.uuid4()
     _insert_running(db_engine, audit_id, url, keyword)
 
@@ -107,10 +121,11 @@ async def run_audit(
 
     # Every stage below targets the post-redirect URL so CWV, GSC and the
     # on-page checks all describe the same page.
-    psi_result, (gsc_pull, gsc_error), link_status = await asyncio.gather(
+    psi_result, (gsc_pull, gsc_error), link_status, source_results = await asyncio.gather(
         _cwv(psi, fetched.final_url),
         _gsc(gsc, fetched.final_url),
         _probe_internal(doc, fetched.final_url) if check_internal_links else _none(),
+        _sources(sources or {}, fetched.final_url),
     )
 
     ctx = AuditContext(
@@ -139,6 +154,8 @@ async def run_audit(
         ],
         gsc=gsc_pull,
         gsc_error=gsc_error,
+        sources=[r for r in source_results if isinstance(r, SourcePull)],
+        source_errors={name: r for name, r in zip(sources or {}, source_results, strict=True) if isinstance(r, str)},
     )
 
 
@@ -160,6 +177,20 @@ async def _gsc(
         return await gsc(url), None
     except ConnectorError as exc:
         return None, str(exc)
+
+
+async def _sources(
+    pulls: Mapping[str, Callable[[str], Awaitable[SourcePull]]], url: str
+) -> list[SourcePull | str]:
+    """Run every source pull at once; each yields its result or its error text."""
+
+    async def one(pull: Callable[[str], Awaitable[SourcePull]]) -> SourcePull | str:
+        try:
+            return await pull(url)
+        except ConnectorError as exc:
+            return str(exc)
+
+    return list(await asyncio.gather(*(one(pull) for pull in pulls.values())))
 
 
 async def _probe_internal(doc: ParsedDocument, url: str) -> LinkStatus:
