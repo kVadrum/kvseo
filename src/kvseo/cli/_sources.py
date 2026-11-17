@@ -8,7 +8,7 @@ environment variables, read directly (there is no ``env:`` indirection).
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sized
 
 from sqlalchemy.engine import Engine
 
@@ -75,7 +75,8 @@ def audit_pulls(engine: Engine, keyword: str | None) -> dict[str, Pull]:
 
             async def dfs_volume(url: str) -> SourcePull:
                 found = await dfs.keyword_volume([keyword])
-                return SourcePull(source="dataforseo", rows=len(found), detail=f"search volume for '{keyword}'")
+                what = "sample search volume (sandbox)" if dfs.sandbox else "search volume"
+                return SourcePull(source="dataforseo", rows=len(found), detail=_found(found, what, keyword))
 
             pulls["dataforseo"] = dfs_volume
         elif (oseo := openseo(engine)) is not None:
@@ -83,7 +84,12 @@ def audit_pulls(engine: Engine, keyword: str | None) -> dict[str, Pull]:
             async def oseo_volume(url: str) -> SourcePull:
                 project = await oseo.project_for(url)
                 found = await oseo.keyword_volume([keyword], project_id=project.id)
-                return SourcePull(source="openseo", rows=len(found), detail=f"keyword metrics for '{keyword}'")
+                return SourcePull(source="openseo", rows=len(found), detail=_found(found, "keyword metrics", keyword))
 
             pulls["openseo"] = oseo_volume
     return pulls
+
+
+def _found(rows: Sized, what: str, keyword: str) -> str:
+    # A call that answered with nothing is not the same as one that stored data.
+    return f"{what} for '{keyword}'" if rows else f"no {what} returned for '{keyword}'"

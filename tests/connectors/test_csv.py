@@ -216,17 +216,41 @@ async def test_keywords_import_is_marked_csv_not_dataforseo(tmp_path: Path) -> N
     csv_path.write_text(
         "Keyword,Avg. monthly searches,Competition,Competition (indexed value),CPC (USD)\n"
         "ops consulting,880,Low,23,$9.50\n"
-        "seo audit,\"2,900\",High,71,6.1\n",
+        "seo audit,\"2,900\",High,71,6.1\n"
+        "ops audit template,40,Low,1,0.80\n",
         encoding="utf-8",
     )
     engine = _engine(tmp_path)
     result = await CsvConnector(engine=engine).import_csv(csv_path, schema="keywords", site=SITE)
 
-    assert (result.table, result.imported) == ("dataforseo_data", 2)
+    assert (result.table, result.imported) == ("dataforseo_data", 3)
     with Session(engine) as session:
         stored = latest_keyword_volume(session, "seo audit")
         assert stored is not None
-        volume, source = stored
+        volume, source, _ = stored
         assert (volume.search_volume, volume.competition, volume.cpc_usd, source) == (2900, 0.71, 6.1, "csv")
+        # An index of 1 is the bottom of the 0-100 scale, not 100%.
+        low = latest_keyword_volume(session, "ops audit template")
+        assert low is not None and low[0].competition == 0.01
         costs = session.scalars(select(DataForSeoData.estimated_cost_usd)).all()
-        assert costs == [None, None]  # nothing was billed
+        assert costs == [None, None, None]  # nothing was billed
+
+
+@pytest.mark.parametrize("site", ["sc-domain:kemek.net", "kemek.net", "www.kemek.net"])
+async def test_rankings_import_accepts_a_domain_property_or_bare_host(tmp_path: Path, site: str) -> None:
+    """--site takes a GSC domain property for `queries`; the same value must file
+    rankings under the domain the page lookup reads, not under no domain."""
+    csv_path = tmp_path / "ranks.csv"
+    csv_path.write_text("Keyword,Rank,URL\nops consulting,14,https://kemek.net/services/\n", encoding="utf-8")
+    engine = _engine(tmp_path)
+    await CsvConnector(engine=engine).import_csv(csv_path, schema="rankings", site=site)
+    with Session(engine) as session:
+        found = rankings_for_page(session, "https://kemek.net/services", None, limit=25)
+        assert [(r.keyword, r.domain) for r in found] == [("ops consulting", "kemek.net")]
+
+
+async def test_rankings_import_refuses_a_site_with_no_domain(tmp_path: Path) -> None:
+    csv_path = tmp_path / "ranks.csv"
+    csv_path.write_text("Keyword,Rank\nops consulting,14\n", encoding="utf-8")
+    with pytest.raises(CsvImportError, match="names no domain"):
+        await CsvConnector(engine=_engine(tmp_path)).import_csv(csv_path, schema="rankings", site="")

@@ -159,6 +159,9 @@ def rankings_for_page(session: Session, page: str, keyword: str | None, *, limit
     relevant = [
         r for r in rows if (r.url and _page_key(r.url) == page_key) or (target and r.keyword.lower() == target)
     ]
+    # The target keyword first, so a page with more rankings than the limit
+    # still reports the one the audit is about.
+    relevant.sort(key=lambda r: not (target and r.keyword.lower() == target))
     return [
         SerpBearRanking(
             keyword=r.keyword,
@@ -174,9 +177,12 @@ def rankings_for_page(session: Session, page: str, keyword: str | None, *, limit
     ]
 
 
-def serpbear_domain(url: str) -> str:
-    """The domain SerpBear files ``url`` under: its host without ``www.``."""
-    return _bare_host(url)
+def serpbear_domain(site: str) -> str:
+    """The domain SerpBear files ``site`` under: its host without ``www.``.
+    Takes a URL, a bare host, or a Search Console domain property
+    (``sc-domain:kemek.net``), since ``--site`` accepts all three."""
+    site = site.strip().removeprefix("sc-domain:")
+    return _bare_host(site if "://" in site else f"//{site}")
 
 
 def _bare_host(url: str) -> str:

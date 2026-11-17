@@ -5,6 +5,7 @@ of HTTP errors. Network mocked via httpx.MockTransport."""
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +14,14 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from kvseo.connectors.base import Connector, ConnectorAuthError, ConnectorUnavailable
-from kvseo.connectors.dataforseo import SANDBOX_URL, DataForSeoConnector, latest_keyword_volume
+from kvseo.connectors.base import Connector, ConnectorAuthError, ConnectorRateLimited, ConnectorUnavailable
+from kvseo.connectors.dataforseo import (
+    SANDBOX_URL,
+    DataForSeoConnector,
+    DfsKeywordVolume,
+    latest_keyword_volume,
+    persist_keyword_volumes,
+)
 from kvseo.storage.db import get_engine, migrate
 from kvseo.storage.models import DataForSeoData
 
@@ -103,12 +110,46 @@ async def test_cached_keywords_are_not_billed_again(engine: Any) -> None:
         assert session.scalar(select(func.count()).select_from(DataForSeoData)) == 2
 
 
+@pytest.mark.parametrize("other_source", ["csv", "sandbox"])
+async def test_the_cache_serves_only_rows_this_endpoint_fetched(engine: Any, other_source: str) -> None:
+    """A CSV import or sandbox sample in the same table is not a live call, so
+    a live connector still asks DataForSEO."""
+    stale = DfsKeywordVolume(keyword="seo audit", location_code=2840, language_code="en", search_volume=12345,
+                             cpc_usd=None, competition=None, monthly_searches=[], fetched_at=datetime.now(UTC))
+    persist_keyword_volumes(engine, [stale], cost=None, source=other_source)
+    seen: list[httpx.Request] = []
+    rows = await DataForSeoConnector("l", "p", engine=engine, client=_client(VOLUME, seen)).keyword_volume(
+        ["seo audit"]
+    )
+    assert [r.search_volume for r in rows] == [2900]
+    assert len(seen) == 1
+
+
+async def test_sandbox_rows_are_tagged_and_never_inform_advice(engine: Any) -> None:
+    """The sandbox answers with sample numbers: stored as 'sandbox', served back
+    only to a sandbox connection, and never read by the advisor."""
+    sandbox = DataForSeoConnector("l", "p", sandbox=True, engine=engine, client=_client(VOLUME))
+    await sandbox.keyword_volume(["seo audit"])
+    with Session(engine) as session:
+        assert set(session.scalars(select(DataForSeoData.source)).all()) == {"sandbox"}
+        assert latest_keyword_volume(session, "seo audit") is None
+    seen: list[httpx.Request] = []
+    await DataForSeoConnector("l", "p", sandbox=True, engine=engine, client=_client(VOLUME, seen)).keyword_volume(
+        ["seo audit"]
+    )
+    assert seen == []  # the sandbox's own cache still works
+
+
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
         # DataForSEO reports failures in the body of an HTTP 200.
         ({"status_code": 40100, "status_message": "You are not authorized.", "tasks": []}, ConnectorAuthError),
         ({"status_code": 40200, "status_message": "Insufficient funds.", "tasks": []}, ConnectorAuthError),
+        ({"status_code": 40210, "status_message": "Balance too low.", "tasks": []}, ConnectorAuthError),
+        # Neighbours in the 401xx/402xx band that are not the account's fault.
+        ({"status_code": 40202, "status_message": "Rate limit per minute.", "tasks": []}, ConnectorRateLimited),
+        (_envelope([], task_status=40102), ConnectorUnavailable),  # no search results
         ({"status_code": 50000, "status_message": "Internal error.", "tasks": []}, ConnectorUnavailable),
         (_envelope([], task_status=40501), ConnectorUnavailable),  # a per-task failure
     ],

@@ -137,12 +137,14 @@ def build_context(
 
 
 def keyword_metrics(session: Session, keyword: str) -> list[KeywordMetric]:
-    """The target keyword's demand data — DataForSEO's (or a CSV import into the
-    same table) when stored, else OpenSEO's (the same data one hop removed),
-    matching which one an audit pulls."""
+    """The target keyword's demand data: the newest stored, whether DataForSEO's,
+    a CSV import into the same table, or OpenSEO's (the same data one hop
+    removed). Newest, not a fixed preference, so an old import never outranks
+    the pull the audit just made."""
     stored = latest_keyword_volume(session, keyword)
-    if stored is not None:
-        dfs, origin = stored
+    oseo = latest_keyword_metrics(session, keyword)
+    if stored is not None and (oseo is None or stored[2] >= oseo[1]):
+        dfs, origin, _ = stored
         return [
             KeywordMetric(
                 keyword=dfs.keyword,
@@ -152,17 +154,17 @@ def keyword_metrics(session: Session, keyword: str) -> list[KeywordMetric]:
                 competition=dfs.competition,
             )
         ]
-    oseo = latest_keyword_metrics(session, keyword)
     if oseo is not None:
+        metrics = oseo[0]
         return [
             KeywordMetric(
-                keyword=oseo.keyword,
+                keyword=metrics.keyword,
                 source="openseo",
-                monthly_volume=oseo.monthly_volume,
-                cpc_usd=oseo.cpc_usd,
-                competition=oseo.competition,
-                keyword_difficulty=oseo.keyword_difficulty,
-                intent=oseo.intent,
+                monthly_volume=metrics.monthly_volume,
+                cpc_usd=metrics.cpc_usd,
+                competition=metrics.competition,
+                keyword_difficulty=metrics.keyword_difficulty,
+                intent=metrics.intent,
             )
         ]
     return []

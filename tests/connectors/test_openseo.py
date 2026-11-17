@@ -10,9 +10,10 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.orm import Session
 
 from kvseo.connectors.base import Connector, ConnectorAuthError, ConnectorUnavailable
-from kvseo.connectors.openseo import OpenSeoConnector
+from kvseo.connectors.openseo import OpenSeoConnector, _response_message, latest_keyword_metrics
 from kvseo.storage.db import get_engine, migrate
 
 PROJECTS = {"projects": [{"id": "p1", "name": "Agency", "domain": "agency.example"},
@@ -161,3 +162,33 @@ async def test_serp_reads_best_position_and_reports_failed_keywords() -> None:
         await OpenSeoConnector("k", client=FakeMcp({"get_serp_results": failed}).client()).serp(
             "seo audit", project_id="p2"
         )
+
+
+async def test_a_project_without_a_domain_key_still_parses() -> None:
+    projects = {"projects": [{"id": "p1", "name": "Scratch"}]}
+    conn = OpenSeoConnector("k", client=FakeMcp({"list_projects": projects}).client())
+    assert (await conn.project_for("kemek.net")).id == "p1"
+
+
+async def test_the_keyword_cache_is_per_project(tmp_path: Path) -> None:
+    """A project sets the market, so p2's numbers are no answer for p1."""
+    db = tmp_path / "kvseo.db"
+    migrate(db)
+    engine = get_engine(db)
+    first = FakeMcp({"get_keyword_metrics": METRICS})
+    await OpenSeoConnector("k", engine=engine, client=first.client()).keyword_volume(["seo audit"], project_id="p2")
+    other = FakeMcp({"get_keyword_metrics": METRICS})
+    await OpenSeoConnector("k", engine=engine, client=other.client()).keyword_volume(["seo audit"], project_id="p1")
+    assert [m.get("method") for m in other.messages][-1] == "tools/call"
+    with Session(engine) as session:
+        stored = latest_keyword_metrics(session, "SEO audit")
+        assert stored is not None and stored[0].monthly_volume == 2900
+
+
+def test_event_stream_joins_multiline_data_and_skips_server_requests() -> None:
+    """SSE joins an event's data lines; a server request reusing the id is not the reply."""
+    reply = {"jsonrpc": "2.0", "id": 2, "result": {"ok": True}}
+    data = "\n".join(f"data: {line}" for line in json.dumps(reply, indent=1).splitlines())
+    stream = f'event: message\ndata: {{"jsonrpc": "2.0", "id": 2, "method": "ping"}}\n\nevent: message\n{data}\n\n'
+    resp = httpx.Response(200, text=stream, headers={"content-type": "text/event-stream"})
+    assert _response_message(resp, 2) == reply

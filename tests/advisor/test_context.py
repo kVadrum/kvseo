@@ -89,7 +89,7 @@ def _store_v02_rows(engine: Engine) -> None:
                 ),
                 OpenSeoData(
                     resource_type="keyword_volume",
-                    resource_key="ops consulting",
+                    resource_key="p1:ops consulting",
                     payload={"keyword": "ops consulting", "monthly_volume": 700, "cpc_usd": None,
                              "competition": None, "keyword_difficulty": 33, "intent": "commercial"},
                 ),
@@ -116,7 +116,7 @@ def test_v02_sources_reach_the_context_and_resolve_as_evidence(
     _store_v02_rows(audit_engine)
     ctx = build_context(aid, audit_engine)
 
-    # DataForSEO wins over OpenSEO for the same keyword, as the audit's pull does.
+    # Stored the same moment: DataForSEO's, the direct source, wins the tie.
     assert [(m.source, m.monthly_volume) for m in ctx.keyword_metrics] == [("dataforseo", 880)]
     # Only rankings bearing on this page or the target keyword; history trimmed.
     assert [r.keyword for r in ctx.serpbear_rankings] == ["ops consulting"]
@@ -132,9 +132,36 @@ def test_openseo_metrics_stand_in_when_dataforseo_has_none(
 ) -> None:
     aid = seed(audit_engine)
     with Session(audit_engine) as s:
-        s.add(OpenSeoData(resource_type="keyword_volume", resource_key="ops consulting",
+        s.add(OpenSeoData(resource_type="keyword_volume", resource_key="p1:ops consulting",
                           payload={"keyword": "ops consulting", "monthly_volume": 700, "cpc_usd": None,
                                    "competition": None, "keyword_difficulty": 33, "intent": "commercial"}))
         s.commit()
     metrics = build_context(aid, audit_engine).keyword_metrics
     assert [(m.source, m.keyword_difficulty, m.intent) for m in metrics] == [("openseo", 33, "commercial")]
+
+
+def test_newest_demand_data_wins_and_sandbox_never_informs_advice(
+    audit_engine: Engine, seed: Callable[..., uuid.UUID]
+) -> None:
+    """An old CSV import must not outrank the OpenSEO pull an audit just made,
+    and DataForSEO sandbox rows (sample data) are never read back."""
+    aid = seed(audit_engine)
+    volume = {"keyword": "ops consulting", "location_code": 2840, "language_code": "en", "search_volume": 10,
+              "cpc_usd": None, "competition": None, "monthly_searches": [], "fetched_at": "2026-01-01T00:00:00Z"}
+    with Session(audit_engine) as s:
+        s.add_all(
+            [
+                DataForSeoData(resource_type="keyword_volume", resource_key="2840:en:ops consulting",
+                               payload=volume, source="csv", fetched_at="2026-01-01 00:00:00"),
+                OpenSeoData(resource_type="keyword_volume", resource_key="p1:ops consulting",
+                            payload={"keyword": "ops consulting", "monthly_volume": 700, "cpc_usd": None,
+                                     "competition": None, "keyword_difficulty": 33, "intent": "commercial"},
+                            fetched_at="2026-11-16 00:00:00"),
+                DataForSeoData(resource_type="keyword_volume", resource_key="2840:en:ops consulting",
+                               payload={**volume, "search_volume": 99999}, source="sandbox",
+                               fetched_at="2026-11-17 00:00:00"),
+            ]
+        )
+        s.commit()
+    metrics = build_context(aid, audit_engine).keyword_metrics
+    assert [(m.source, m.monthly_volume) for m in metrics] == [("openseo", 700)]

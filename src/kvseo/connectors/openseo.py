@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -40,7 +40,7 @@ _KEYWORD_FRESHNESS = timedelta(days=7)
 class OpenSeoProject(BaseModel):
     id: str
     name: str
-    domain: str | None
+    domain: str | None = None  # absent, not just null, on a project with no site set
 
 
 class OpenSeoKeyword(BaseModel):
@@ -116,7 +116,7 @@ class OpenSeoConnector:
     ) -> list[OpenSeoKeyword]:
         """Volume, CPC, competition, difficulty and intent per keyword (``get_keyword_metrics``)."""
         wanted = list(dict.fromkeys(k.strip().lower() for k in keywords if k.strip()))
-        cached = {} if refresh else self._cached(wanted)
+        cached = {} if refresh else self._cached(wanted, project_id)
         missing = [k for k in wanted if k not in cached]
         if missing:
             data = await self._call_tool(
@@ -124,7 +124,9 @@ class OpenSeoConnector:
                 {"projectId": project_id, "keywords": missing, "includeMonthlyTrends": False},
             )
             fresh = [_keyword(row) for row in data.get("keywords") or []]
-            self._persist("keyword_volume", [(k.keyword.lower(), k.model_dump()) for k in fresh])
+            self._persist(
+                "keyword_volume", [(_metrics_key(project_id, k.keyword), k.model_dump()) for k in fresh]
+            )
             cached.update({k.keyword.lower(): k for k in fresh})
         return [cached[k] for k in wanted if k in cached]
 
@@ -149,7 +151,7 @@ class OpenSeoConnector:
                 if item.get("type") in (None, "organic")
             ],
         )
-        self._persist("serp", [(keyword.strip().lower(), serp.model_dump(mode="json"))])
+        self._persist("serp", [(_metrics_key(project_id, keyword), serp.model_dump(mode="json"))])
         return serp
 
     async def domain_overview(self, domain: str, *, project_id: str) -> OpenSeoDomainOverview:
@@ -239,44 +241,56 @@ class OpenSeoConnector:
             )
             session.commit()
 
-    def _cached(self, keywords: list[str]) -> dict[str, OpenSeoKeyword]:
+    def _cached(self, keywords: list[str], project_id: str) -> dict[str, OpenSeoKeyword]:
         if self._engine is None:
             return {}
         found: dict[str, OpenSeoKeyword] = {}
         with Session(self._engine) as session:
             for keyword in keywords:
-                row = _latest(session, keyword)
+                row = _latest(session, OpenSeoData.resource_key == _metrics_key(project_id, keyword))
                 if row is not None and datetime.now(UTC) - parse_ts(row.fetched_at) <= _KEYWORD_FRESHNESS:
                     found[keyword] = OpenSeoKeyword.model_validate(row.payload)
         return found
 
 
-def latest_keyword_metrics(session: Session, keyword: str) -> OpenSeoKeyword | None:
-    """The most recent stored OpenSEO metrics for ``keyword``, for the advisor."""
-    row = _latest(session, keyword.strip().lower())
-    return OpenSeoKeyword.model_validate(row.payload) if row is not None else None
+def latest_keyword_metrics(session: Session, keyword: str) -> tuple[OpenSeoKeyword, str] | None:
+    """The most recent stored OpenSEO metrics for ``keyword`` in any project, and
+    when they were fetched, for the advisor. The audit that just ran pulled for
+    the audited site's project, so the newest row is that project's."""
+    key = keyword.strip().lower()
+    row = _latest(session, OpenSeoData.resource_key.endswith(f":{key}", autoescape=True))
+    if row is None or str(row.payload.get("keyword", "")).lower() != key:
+        return None
+    return OpenSeoKeyword.model_validate(row.payload), row.fetched_at
 
 
-def _latest(session: Session, key: str) -> OpenSeoData | None:
+def _latest(session: Session, key_matches: ColumnElement[bool]) -> OpenSeoData | None:
     return session.scalars(
         select(OpenSeoData)
-        .where(OpenSeoData.resource_type == "keyword_volume", OpenSeoData.resource_key == key)
+        .where(OpenSeoData.resource_type == "keyword_volume", key_matches)
         .order_by(OpenSeoData.fetched_at.desc())
         .limit(1)
     ).first()
 
 
+def _metrics_key(project_id: str, keyword: str) -> str:
+    # The project sets the market (location and language), so the same keyword
+    # in two projects is two different measurements.
+    return f"{project_id}:{keyword.strip().lower()}"
+
+
 def _response_message(resp: httpx.Response, msg_id: int) -> dict[str, Any]:
     """The JSON-RPC response with ``msg_id``, from a JSON body or an SSE stream."""
     if resp.headers.get("content-type", "").startswith("text/event-stream"):
-        for line in resp.text.splitlines():
-            if not line.startswith("data:"):
-                continue
+        for event in _sse_data(resp.text):
             try:
-                message = json.loads(line[5:].strip())
+                message = json.loads(event)
             except ValueError:
                 continue
-            if isinstance(message, dict) and message.get("id") == msg_id:
+            if not isinstance(message, dict) or message.get("id") != msg_id:
+                continue
+            # A server request may reuse a numeric id; only a reply carries these.
+            if "result" in message or "error" in message:
                 return message
         raise ConnectorUnavailable("OpenSEO's event stream ended without a reply")
     try:
@@ -286,6 +300,22 @@ def _response_message(resp: httpx.Response, msg_id: int) -> dict[str, Any]:
     if not isinstance(message, dict):
         raise ConnectorUnavailable("OpenSEO returned an unexpected JSON-RPC reply")
     return message
+
+
+def _sse_data(text: str) -> list[str]:
+    """Each event's data, per the SSE spec: an event's ``data:`` lines join with
+    newlines and a blank line ends the event, so a JSON body split across lines
+    still arrives whole."""
+    events: list[str] = []
+    lines: list[str] = []
+    for line in [*text.splitlines(), ""]:
+        if line.startswith("data:"):
+            value = line[5:]
+            lines.append(value[1:] if value.startswith(" ") else value)
+        elif not line and lines:
+            events.append("\n".join(lines))
+            lines = []
+    return events
 
 
 def _bare(domain: str) -> str:

@@ -184,11 +184,18 @@ async def test_source_pulls_run_and_fail_independently(tmp_path: Path) -> None:
     async def dataforseo(url: str) -> SourcePull:
         raise ConnectorAuthError("DataForSEO 40200: Insufficient funds.")
 
+    async def openseo(url: str) -> SourcePull:
+        # An upstream reply in a shape the parser never saw: not a ConnectorError.
+        raise KeyError("structuredContent")
+
     result = await run_audit(
         URL, db_engine=get_engine(db), fetch_client=_fetch_client(), psi=None,
-        sources={"serpbear": serpbear, "dataforseo": dataforseo},
+        sources={"serpbear": serpbear, "dataforseo": dataforseo, "openseo": openseo},
     )
     assert result.status == "complete"
     assert [p.source for p in result.sources] == ["serpbear"]
-    assert result.source_errors == {"dataforseo": "DataForSEO 40200: Insufficient funds."}
+    assert result.source_errors == {
+        "dataforseo": "DataForSEO 40200: Insufficient funds.",
+        "openseo": "KeyError: 'structuredContent'",
+    }
     assert asked == [URL]

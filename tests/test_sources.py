@@ -101,3 +101,20 @@ def test_audit_asks_only_connected_and_relevant_sources(
     store[("kvseo", _sources.SERPBEAR_URL)] = "https://sb.example"
     store[("kvseo", _sources.SERPBEAR_TOKEN)] = "k"
     assert set(_sources.audit_pulls(audit_engine, "seo audit")) == {"serpbear", "dataforseo"}
+
+
+async def test_pulls_say_when_a_source_answered_with_nothing(
+    store: dict[tuple[str, str], str], audit_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run the pull closures themselves: an empty answer is not reported as data
+    stored, and a sandbox connection says its numbers are samples."""
+    store[("kvseo", _sources.DATAFORSEO_LOGIN)] = "a@b.c"
+    store[("kvseo", _sources.DATAFORSEO_PASSWORD)] = "pw"
+    monkeypatch.setattr(DataForSeoConnector, "keyword_volume", _returns([]))
+    pull = await _sources.audit_pulls(audit_engine, "seo audit")["dataforseo"]("https://kemek.net/")
+    assert (pull.rows, pull.detail) == (0, "no search volume returned for 'seo audit'")
+
+    store[("kvseo", _sources.DATAFORSEO_SANDBOX)] = "1"
+    monkeypatch.setattr(DataForSeoConnector, "keyword_volume", _returns(["row"]))
+    pull = await _sources.audit_pulls(audit_engine, "seo audit")["dataforseo"]("https://kemek.net/")
+    assert pull.detail == "sample search volume (sandbox) for 'seo audit'"

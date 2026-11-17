@@ -62,12 +62,13 @@ _RANKING_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "location": ("location", "country", "market"),
     "device": ("device",),
 }
+_INDEXED_COMPETITION = ("competition (indexed value)", "competition index")
 _KEYWORD_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "keyword": ("keyword", "keywords", "query", "search term", "term"),
     "search_volume": ("search volume", "search_volume", "volume", "avg. monthly searches", "monthly searches", "sv"),
     "cpc": ("cpc", "cpc (usd)", "cost per click"),
     # Keyword Planner exports both; the indexed value (0-100) is the numeric one.
-    "competition": ("competition (indexed value)", "competition index", "competition"),
+    "competition": (*_INDEXED_COMPETITION, "competition"),
 }
 _UNRANKED = {"", "0", "-", "—", "n/a", "not ranked", ">100", "100+", "> 100"}
 
@@ -148,6 +149,9 @@ class CsvConnector:
         elif schema == "rankings":
             checked = (date_end or _today()).isoformat()
             domain = serpbear_domain(site)
+            if not domain:
+                # Rows filed under no domain import "successfully" and are never read.
+                raise CsvImportError(f"--site '{site}' names no domain for the rankings to belong to")
             rows, errors, total = self._read(
                 path, mapping, _RANKING_HEADER_ALIASES, ("keyword", "position"),
                 lambda raw, cols: _row_to_ranking(raw, cols, domain, checked),
@@ -367,20 +371,24 @@ def _row_to_volume(raw: dict[str, str], cols: dict[str, str], fetched_at: dateti
         language_code="en",
         search_volume=_int(volume) if volume else None,
         cpc_usd=_float(cpc) if cpc else None,
-        competition=_competition(_cell(raw, cols, "competition")),
+        competition=_competition(
+            _cell(raw, cols, "competition"),
+            indexed=cols.get("competition", "").strip().lower() in _INDEXED_COMPETITION,
+        ),
         monthly_searches=[],
         fetched_at=fetched_at,
     )
 
 
-def _competition(value: str) -> float | None:
-    """A 0-1 fraction from a 0-1 or 0-100 number. Text levels ('Low', 'High')
-    carry no number to keep, so they read as unknown rather than a guess."""
+def _competition(value: str, *, indexed: bool) -> float | None:
+    """A 0-1 fraction. An indexed column is 0-100 on every row, so an index of 1
+    is 0.01; only an unnamed scale is guessed from the number itself. Text levels
+    ('Low', 'High') carry no number to keep, so they read as unknown."""
     try:
         number = float(value.replace(",", ""))
     except ValueError:
         return None
-    return number / 100 if number > 1 else number
+    return number / 100 if indexed or number > 1 else number
 
 
 def _today() -> date:

@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from kvseo.connectors.base import Connector, ConnectorAuthError, ConnectorUnavailable
-from kvseo.connectors.serpbear import SerpBearConnector, rankings_for_page
+from kvseo.connectors.serpbear import SerpBearConnector, rankings_for_page, serpbear_domain
 from kvseo.storage.db import get_engine, migrate
 
 KEYWORDS = {
@@ -112,3 +112,16 @@ async def test_rankings_for_page_match_the_page_or_the_target_keyword(tmp_path: 
         with_target = rankings_for_page(session, "https://kemek.net/audit", "ops consulting", limit=25)
         assert sorted(r.keyword for r in with_target) == ["ops consulting", "seo audit"]
         assert rankings_for_page(session, "https://elsewhere.example/", None, limit=25) == []
+        # At the limit the target keyword still makes the cut, though the home
+        # page's own ranking ("kemek network") sorts ahead of it.
+        home = rankings_for_page(session, "https://kemek.net/", "ops consulting", limit=1)
+        assert [r.keyword for r in home] == ["ops consulting"]
+
+
+@pytest.mark.parametrize(
+    ("site", "domain"),
+    [("https://www.kemek.net/x", "kemek.net"), ("kemek.net", "kemek.net"), ("sc-domain:kemek.net", "kemek.net"),
+     ("", "")],
+)
+def test_serpbear_domain_reads_every_site_form(site: str, domain: str) -> None:
+    assert serpbear_domain(site) == domain

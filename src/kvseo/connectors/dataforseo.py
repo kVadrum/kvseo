@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from kvseo.connectors.base import (
     ConnectorAuthError,
     ConnectorMeta,
+    ConnectorRateLimited,
     ConnectorUnavailable,
 )
 from kvseo.storage.models import DataForSeoData
@@ -36,6 +37,13 @@ _TIMEOUT = httpx.Timeout(60.0)  # live SERP tasks routinely take 10-30s
 _KEYWORD_FRESHNESS = timedelta(days=7)
 _SERP_FRESHNESS = timedelta(days=1)
 _OK = 20000
+# DataForSEO's error appendix. 401xx/402xx is not one class: these codes need
+# the user to act on the account (login, balance, plan, IP allowlist)...
+_ACCOUNT_CODES = frozenset({40100, 40104, 40200, 40201, 40203, 40204, 40207, 40208, 40210})
+# ...these clear on their own, after roughly this many seconds...
+_RATE_LIMIT_WAIT = {40202: 60, 40205: 3600, 40206: 86400, 40209: 5}
+# ...and the rest (40101 internal error, 40102 no results, 40103 task failed,
+# 40107 timeout, ...) are one task's outcome, not a fault in the connection.
 
 
 class MonthlyVolume(BaseModel):
@@ -97,6 +105,11 @@ class DataForSeoConnector:
     ) -> None:
         self._auth = httpx.BasicAuth(login, password)
         self._base = SANDBOX_URL if sandbox else LIVE_URL
+        # Rows record which endpoint answered, and the cache serves only its own:
+        # the sandbox's sample numbers must never be read back as live data, and
+        # a CSV import in the same table is not a call this connector made.
+        self._source = "sandbox" if sandbox else "api"
+        self.sandbox = sandbox
         self._engine = engine
         self._client = client
 
@@ -127,7 +140,7 @@ class DataForSeoConnector:
             fetched_at = datetime.now(UTC)
             fresh = [_volume(item, location_code, language_code, fetched_at) for item in result]
             if self._engine is not None:
-                persist_keyword_volumes(self._engine, fresh, cost=cost, source="api")
+                persist_keyword_volumes(self._engine, fresh, cost=cost, source=self._source)
             cached.update({v.keyword.lower(): v for v in fresh})
         return [cached[k] for k in wanted if k in cached]
 
@@ -225,6 +238,7 @@ class DataForSeoConnector:
                     resource_key=key,
                     payload=payload,
                     estimated_cost_usd=share,
+                    source=self._source,
                     fetched_at=fetched_at,
                 )
                 for key, payload in rows
@@ -237,7 +251,11 @@ class DataForSeoConnector:
         with Session(self._engine) as session:
             row = session.scalars(
                 select(DataForSeoData)
-                .where(DataForSeoData.resource_type == resource_type, DataForSeoData.resource_key == key)
+                .where(
+                    DataForSeoData.resource_type == resource_type,
+                    DataForSeoData.resource_key == key,
+                    DataForSeoData.source == self._source,
+                )
                 .order_by(DataForSeoData.fetched_at.desc())
                 .limit(1)
             ).first()
@@ -261,8 +279,8 @@ def persist_keyword_volumes(
     engine: Engine, volumes: list[DfsKeywordVolume], *, cost: float | None, source: str
 ) -> None:
     """Write keyword-volume rows — the canonical write path, shared with the CSV
-    ``keywords`` import. ``source`` records where the numbers came from ('api' or
-    'csv'), since both land in this table in the same shape."""
+    ``keywords`` import. ``source`` records where the numbers came from ('api',
+    'sandbox' or 'csv'), since all three land in this table in the same shape."""
     if not volumes:
         return
     # A call's cost is split across the rows it produced, so summing the table
@@ -286,19 +304,23 @@ def persist_keyword_volumes(
 
 def latest_keyword_volume(
     session: Session, keyword: str, location_code: int = US, language_code: str = "en"
-) -> tuple[DfsKeywordVolume, str] | None:
-    """The most recent stored volume row for ``keyword`` and its source ('api' or
-    'csv'), for the advisor."""
+) -> tuple[DfsKeywordVolume, str, str] | None:
+    """The most recent stored volume row for ``keyword``, its source ('api' or
+    'csv') and when it was stored, for the advisor. Sandbox rows are sample
+    data and never inform advice."""
     row = session.scalars(
         select(DataForSeoData)
         .where(
             DataForSeoData.resource_type == "keyword_volume",
             DataForSeoData.resource_key == _volume_key(keyword, location_code, language_code),
+            DataForSeoData.source != "sandbox",
         )
         .order_by(DataForSeoData.fetched_at.desc())
         .limit(1)
     ).first()
-    return (DfsKeywordVolume.model_validate(row.payload), row.source) if row is not None else None
+    if row is None:
+        return None
+    return DfsKeywordVolume.model_validate(row.payload), row.source, row.fetched_at
 
 
 def _volume_key(keyword: str, location_code: int, language_code: str) -> str:
@@ -309,9 +331,10 @@ def _raise_for_status(code: Any, message: Any) -> None:
     if code == _OK or code is None:
         return
     detail = f"DataForSEO {code}: {message or 'no message'}"
-    if isinstance(code, int) and 40100 <= code < 40300:
-        # 401xx: credentials; 402xx: balance or plan limits. Both need the user.
+    if code in _ACCOUNT_CODES:
         raise ConnectorAuthError(detail)
+    if code in _RATE_LIMIT_WAIT:
+        raise ConnectorRateLimited(_RATE_LIMIT_WAIT[code], detail)
     raise ConnectorUnavailable(detail)
 
 

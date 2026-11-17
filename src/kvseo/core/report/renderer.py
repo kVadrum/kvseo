@@ -52,9 +52,9 @@ _CWV_BANDS: dict[str, tuple[float, float]] = {
 # 3 impressions is a rounding error, not an opportunity worth an action item.
 _GSC_LIMIT = 15
 _RANKINGS_LIMIT = 25
-# Rank change is read against the check this many points back in SerpBear's
-# history: about a week at its default daily cadence, long enough to mean
-# something, short enough to still describe this page's current state.
+# Rank change is read against the oldest of the last this-many checks. That is
+# all the history SerpBear's API returns (it trims to 7 entries), so six checks
+# apart: about a week at its default daily cadence, more on a slower schedule.
 _TREND_POINTS = 7
 _SOURCE_NAMES = {"dataforseo": "DataForSEO", "openseo": "OpenSEO", "csv": "a CSV import"}
 _STRIKING_POS = (5.0, 20.0)
@@ -232,7 +232,7 @@ def _ranking_order(row: dict[str, Any]) -> tuple[bool, bool, int, str]:
 
 
 def _change(r: SerpBearRanking) -> dict[str, Any]:
-    """Position change since the check ``_TREND_POINTS`` back. Lower is better,
+    """Position change since the oldest of the last ``_TREND_POINTS`` checks. Lower is better,
     so moving from 9 to 4 is a gain of 5. A page entering or leaving the tracked
     results has no number to subtract, so it is named instead."""
     earlier = r.history[-_TREND_POINTS:-1] if len(r.history) > 1 else []

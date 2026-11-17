@@ -189,6 +189,12 @@ async def _sources(
             return await pull(url)
         except ConnectorError as exc:
             return str(exc)
+        except Exception as exc:
+            # Wider than _gsc/_cwv on purpose: these are optional third-party
+            # sources whose reply shapes can change under us, and a parse error
+            # there must not abort an audit whose page was already fetched (and
+            # leave its run stuck 'running'). The error is still shown, typed.
+            return f"{type(exc).__name__}: {exc}"
 
     return list(await asyncio.gather(*(one(pull) for pull in pulls.values())))
 
