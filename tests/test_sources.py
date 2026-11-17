@@ -118,3 +118,18 @@ async def test_pulls_say_when_a_source_answered_with_nothing(
     monkeypatch.setattr(DataForSeoConnector, "keyword_volume", _returns(["row"]))
     pull = await _sources.audit_pulls(audit_engine, "seo audit")["dataforseo"]("https://kemek.net/")
     assert pull.detail == "sample search volume (sandbox) for 'seo audit'"
+
+
+def test_connect_csv_needs_site_only_where_rows_belong_to_a_site(bare_data_dir: Any, tmp_path: Any) -> None:
+    """Keyword volume is market-level, so a keywords import takes no --site;
+    queries and rankings are filed under one, so they still require it."""
+    volume = tmp_path / "planner.csv"
+    volume.write_text("Keyword,Avg. monthly searches\nops consulting,880\n", encoding="utf-8")
+    ok = runner.invoke(app, ["connect", "csv", str(volume), "--schema", "keywords"])
+    assert ok.exit_code == 0, ok.output
+
+    ranks = tmp_path / "ranks.csv"
+    ranks.write_text("Keyword,Rank\nops consulting,14\n", encoding="utf-8")
+    missing = runner.invoke(app, ["connect", "csv", str(ranks), "--schema", "rankings"])
+    assert missing.exit_code == 2
+    assert "--site is required" in missing.output

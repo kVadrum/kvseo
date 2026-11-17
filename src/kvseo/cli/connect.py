@@ -169,9 +169,11 @@ def _verify[T](name: str, check: Coroutine[Any, Any, T]) -> T:
 def csv(
     path: Annotated[Path, typer.Argument(help="Path to the CSV file to import.")],
     site: Annotated[
-        str,
-        typer.Option("--site", help="The site the rows are for, e.g. https://kemek.net/ (unused by 'keywords')."),
-    ],
+        str | None,
+        typer.Option(
+            "--site", help="The site the rows are for, e.g. https://kemek.net/ (required except for 'keywords')."
+        ),
+    ] = None,
     schema: Annotated[
         str,
         typer.Option(
@@ -206,6 +208,9 @@ def csv(
     if start and end and start > end:
         typer.secho(f"--from ({start}) is after --to ({end}).", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
+    if schema != "keywords" and not site:
+        typer.secho(f"--site is required for '{schema}' imports.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
 
     engine = open_db()
     connector = CsvConnector(engine=engine)
@@ -215,7 +220,7 @@ def csv(
                 path,
                 schema=schema,  # type: ignore[arg-type]  # validated inside; raises CsvImportError on bad value
                 mapping=_parse_map(column_map),
-                site=site,
+                site=site or "",
                 default_page=page,
                 date_start=start,
                 date_end=end,

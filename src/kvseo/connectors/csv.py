@@ -124,7 +124,7 @@ class CsvConnector:
         schema: ImportSchema = "queries",
         mapping: dict[str, str] | None = None,
         *,
-        site: str,
+        site: str = "",
         default_page: str | None = None,
         date_start: date | None = None,
         date_end: date | None = None,
@@ -141,6 +141,8 @@ class CsvConnector:
         """
         if schema not in _SUPPORTED:
             raise CsvImportError(f"schema '{schema}' is not importable — use one of {_SUPPORTED}.")
+        if schema != "keywords" and not site.strip():
+            raise CsvImportError(f"--site is required for '{schema}' imports: it names the site the rows belong to")
         rows: Sequence[object]
         if schema == "queries":
             rows, errors, total = self._read_queries(

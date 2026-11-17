@@ -83,7 +83,7 @@ def audit_pulls(engine: Engine, keyword: str | None) -> dict[str, Pull]:
 
             async def oseo_volume(url: str) -> SourcePull:
                 project = await oseo.project_for(url)
-                found = await oseo.keyword_volume([keyword], project_id=project.id)
+                found = await oseo.keyword_volume([keyword], project_id=project.id, site=url)
                 return SourcePull(source="openseo", rows=len(found), detail=_found(found, "keyword metrics", keyword))
 
             pulls["openseo"] = oseo_volume

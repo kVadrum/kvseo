@@ -95,7 +95,7 @@ async def test_keyword_metrics_map_and_cache(tmp_path: Path) -> None:
     engine = get_engine(db)
     fake = FakeMcp({"get_keyword_metrics": METRICS})
     rows = await OpenSeoConnector("k", engine=engine, client=fake.client()).keyword_volume(
-        ["SEO audit"], project_id="p2"
+        ["SEO audit"], project_id="p2", site="https://kemek.net/audit"
     )
     assert rows[0].model_dump() == {
         "keyword": "seo audit",
@@ -113,7 +113,7 @@ async def test_keyword_metrics_map_and_cache(tmp_path: Path) -> None:
 
     again = FakeMcp({})
     cached = await OpenSeoConnector("k", engine=engine, client=again.client()).keyword_volume(
-        ["seo audit"], project_id="p2"
+        ["seo audit"], project_id="p2", site="https://www.kemek.net/other"
     )
     assert cached == rows
     assert again.messages == []  # no credits spent on a fresh cache hit
@@ -170,19 +170,31 @@ async def test_a_project_without_a_domain_key_still_parses() -> None:
     assert (await conn.project_for("kemek.net")).id == "p1"
 
 
-async def test_the_keyword_cache_is_per_project(tmp_path: Path) -> None:
-    """A project sets the market, so p2's numbers are no answer for p1."""
+async def test_each_site_reads_the_metrics_its_own_audit_pulled(tmp_path: Path) -> None:
+    """Two sites in two projects (two markets) ask for the same keyword. Re-auditing
+    the first is a cache hit that writes nothing, yet its report must still read its
+    own market's numbers, not the second site's newer row."""
     db = tmp_path / "kvseo.db"
     migrate(db)
     engine = get_engine(db)
-    first = FakeMcp({"get_keyword_metrics": METRICS})
-    await OpenSeoConnector("k", engine=engine, client=first.client()).keyword_volume(["seo audit"], project_id="p2")
-    other = FakeMcp({"get_keyword_metrics": METRICS})
-    await OpenSeoConnector("k", engine=engine, client=other.client()).keyword_volume(["seo audit"], project_id="p1")
-    assert [m.get("method") for m in other.messages][-1] == "tools/call"
+    uk = {"keywords": [{**METRICS["keywords"][0], "search_volume": 111}]}
+    us_fake, uk_fake = FakeMcp({"get_keyword_metrics": METRICS}), FakeMcp({"get_keyword_metrics": uk})
+    await OpenSeoConnector("k", engine=engine, client=us_fake.client()).keyword_volume(
+        ["seo audit"], project_id="p2", site="https://kemek.net/"
+    )
+    await OpenSeoConnector("k", engine=engine, client=uk_fake.client()).keyword_volume(
+        ["seo audit"], project_id="p1", site="https://agency.example/"
+    )
+    again = FakeMcp({})
+    await OpenSeoConnector("k", engine=engine, client=again.client()).keyword_volume(
+        ["seo audit"], project_id="p2", site="https://kemek.net/"
+    )
+    assert again.messages == []  # served from the cache
     with Session(engine) as session:
-        stored = latest_keyword_metrics(session, "SEO audit")
-        assert stored is not None and stored[0].monthly_volume == 2900
+        mine = latest_keyword_metrics(session, "SEO audit", "https://kemek.net/services")
+        theirs = latest_keyword_metrics(session, "seo audit", "https://agency.example/")
+        assert mine is not None and mine[0].monthly_volume == 2900
+        assert theirs is not None and theirs[0].monthly_volume == 111
 
 
 def test_event_stream_joins_multiline_data_and_skips_server_requests() -> None:

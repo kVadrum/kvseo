@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -112,11 +112,12 @@ class OpenSeoConnector:
         return next((p for p in projects if p.domain and _bare(p.domain) == host), projects[0])
 
     async def keyword_volume(
-        self, keywords: list[str], *, project_id: str, refresh: bool = False
+        self, keywords: list[str], *, project_id: str, site: str, refresh: bool = False
     ) -> list[OpenSeoKeyword]:
-        """Volume, CPC, competition, difficulty and intent per keyword (``get_keyword_metrics``)."""
+        """Volume, CPC, competition, difficulty and intent per keyword (``get_keyword_metrics``),
+        measured in ``project_id``'s market for the audited ``site``."""
         wanted = list(dict.fromkeys(k.strip().lower() for k in keywords if k.strip()))
-        cached = {} if refresh else self._cached(wanted, project_id)
+        cached = {} if refresh else self._cached(wanted, site)
         missing = [k for k in wanted if k not in cached]
         if missing:
             data = await self._call_tool(
@@ -124,9 +125,7 @@ class OpenSeoConnector:
                 {"projectId": project_id, "keywords": missing, "includeMonthlyTrends": False},
             )
             fresh = [_keyword(row) for row in data.get("keywords") or []]
-            self._persist(
-                "keyword_volume", [(_metrics_key(project_id, k.keyword), k.model_dump()) for k in fresh]
-            )
+            self._persist("keyword_volume", [(_metrics_key(site, k.keyword), k.model_dump()) for k in fresh])
             cached.update({k.keyword.lower(): k for k in fresh})
         return [cached[k] for k in wanted if k in cached]
 
@@ -151,7 +150,7 @@ class OpenSeoConnector:
                 if item.get("type") in (None, "organic")
             ],
         )
-        self._persist("serp", [(_metrics_key(project_id, keyword), serp.model_dump(mode="json"))])
+        self._persist("serp", [(f"{project_id}:{keyword.strip().lower()}", serp.model_dump(mode="json"))])
         return serp
 
     async def domain_overview(self, domain: str, *, project_id: str) -> OpenSeoDomainOverview:
@@ -241,42 +240,40 @@ class OpenSeoConnector:
             )
             session.commit()
 
-    def _cached(self, keywords: list[str], project_id: str) -> dict[str, OpenSeoKeyword]:
+    def _cached(self, keywords: list[str], site: str) -> dict[str, OpenSeoKeyword]:
         if self._engine is None:
             return {}
         found: dict[str, OpenSeoKeyword] = {}
         with Session(self._engine) as session:
             for keyword in keywords:
-                row = _latest(session, OpenSeoData.resource_key == _metrics_key(project_id, keyword))
+                row = _latest(session, _metrics_key(site, keyword))
                 if row is not None and datetime.now(UTC) - parse_ts(row.fetched_at) <= _KEYWORD_FRESHNESS:
                     found[keyword] = OpenSeoKeyword.model_validate(row.payload)
         return found
 
 
-def latest_keyword_metrics(session: Session, keyword: str) -> tuple[OpenSeoKeyword, str] | None:
-    """The most recent stored OpenSEO metrics for ``keyword`` in any project, and
-    when they were fetched, for the advisor. The audit that just ran pulled for
-    the audited site's project, so the newest row is that project's."""
-    key = keyword.strip().lower()
-    row = _latest(session, OpenSeoData.resource_key.endswith(f":{key}", autoescape=True))
-    if row is None or str(row.payload.get("keyword", "")).lower() != key:
-        return None
-    return OpenSeoKeyword.model_validate(row.payload), row.fetched_at
+def latest_keyword_metrics(session: Session, keyword: str, site: str) -> tuple[OpenSeoKeyword, str] | None:
+    """The most recent stored OpenSEO metrics for ``keyword`` on ``site``, and when
+    they were fetched, for the advisor."""
+    row = _latest(session, _metrics_key(site, keyword))
+    return (OpenSeoKeyword.model_validate(row.payload), row.fetched_at) if row is not None else None
 
 
-def _latest(session: Session, key_matches: ColumnElement[bool]) -> OpenSeoData | None:
+def _latest(session: Session, key: str) -> OpenSeoData | None:
     return session.scalars(
         select(OpenSeoData)
-        .where(OpenSeoData.resource_type == "keyword_volume", key_matches)
+        .where(OpenSeoData.resource_type == "keyword_volume", OpenSeoData.resource_key == key)
         .order_by(OpenSeoData.fetched_at.desc())
         .limit(1)
     ).first()
 
 
-def _metrics_key(project_id: str, keyword: str) -> str:
-    # The project sets the market (location and language), so the same keyword
-    # in two projects is two different measurements.
-    return f"{project_id}:{keyword.strip().lower()}"
+def _metrics_key(site: str, keyword: str) -> str:
+    # Keyed by the audited site, not the project: the project only sets the
+    # market, and the site decides which project an audit uses. So the cache
+    # and the report both read exactly the numbers that site's audit pulled,
+    # never another project's newer row for the same keyword.
+    return f"{_bare(site)}:{keyword.strip().lower()}"
 
 
 def _response_message(resp: httpx.Response, msg_id: int) -> dict[str, Any]:

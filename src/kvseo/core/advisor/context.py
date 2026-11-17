@@ -121,7 +121,7 @@ def build_context(
         audit = _summarize(run, checks)
         gsc = recent_queries(session, run.fetched_url, limit=max_gsc_queries) if run.fetched_url else []
         psi = _recent_psi(session, run.fetched_url) if run.fetched_url else None
-        metrics = keyword_metrics(session, run.keyword) if run.keyword else []
+        metrics = keyword_metrics(session, run.keyword, run.fetched_url) if run.keyword else []
         rankings = (
             rankings_for_page(session, run.fetched_url, run.keyword, limit=MAX_RANKINGS) if run.fetched_url else []
         )
@@ -136,13 +136,13 @@ def build_context(
     )
 
 
-def keyword_metrics(session: Session, keyword: str) -> list[KeywordMetric]:
+def keyword_metrics(session: Session, keyword: str, site: str | None) -> list[KeywordMetric]:
     """The target keyword's demand data: the newest stored, whether DataForSEO's,
-    a CSV import into the same table, or OpenSEO's (the same data one hop
-    removed). Newest, not a fixed preference, so an old import never outranks
-    the pull the audit just made."""
+    a CSV import into the same table, or OpenSEO's for this ``site`` (the same
+    data one hop removed). Newest, not a fixed preference, so an old import never
+    outranks the pull the audit just made."""
     stored = latest_keyword_volume(session, keyword)
-    oseo = latest_keyword_metrics(session, keyword)
+    oseo = latest_keyword_metrics(session, keyword, site) if site else None
     if stored is not None and (oseo is None or stored[2] >= oseo[1]):
         dfs, origin, _ = stored
         return [

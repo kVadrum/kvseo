@@ -89,7 +89,7 @@ def _store_v02_rows(engine: Engine) -> None:
                 ),
                 OpenSeoData(
                     resource_type="keyword_volume",
-                    resource_key="p1:ops consulting",
+                    resource_key="kemek.net:ops consulting",
                     payload={"keyword": "ops consulting", "monthly_volume": 700, "cpc_usd": None,
                              "competition": None, "keyword_difficulty": 33, "intent": "commercial"},
                 ),
@@ -132,7 +132,7 @@ def test_openseo_metrics_stand_in_when_dataforseo_has_none(
 ) -> None:
     aid = seed(audit_engine)
     with Session(audit_engine) as s:
-        s.add(OpenSeoData(resource_type="keyword_volume", resource_key="p1:ops consulting",
+        s.add(OpenSeoData(resource_type="keyword_volume", resource_key="kemek.net:ops consulting",
                           payload={"keyword": "ops consulting", "monthly_volume": 700, "cpc_usd": None,
                                    "competition": None, "keyword_difficulty": 33, "intent": "commercial"}))
         s.commit()
@@ -153,7 +153,7 @@ def test_newest_demand_data_wins_and_sandbox_never_informs_advice(
             [
                 DataForSeoData(resource_type="keyword_volume", resource_key="2840:en:ops consulting",
                                payload=volume, source="csv", fetched_at="2026-01-01 00:00:00"),
-                OpenSeoData(resource_type="keyword_volume", resource_key="p1:ops consulting",
+                OpenSeoData(resource_type="keyword_volume", resource_key="kemek.net:ops consulting",
                             payload={"keyword": "ops consulting", "monthly_volume": 700, "cpc_usd": None,
                                      "competition": None, "keyword_difficulty": 33, "intent": "commercial"},
                             fetched_at="2026-11-16 00:00:00"),

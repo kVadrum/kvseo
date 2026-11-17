@@ -252,5 +252,8 @@ async def test_rankings_import_accepts_a_domain_property_or_bare_host(tmp_path: 
 async def test_rankings_import_refuses_a_site_with_no_domain(tmp_path: Path) -> None:
     csv_path = tmp_path / "ranks.csv"
     csv_path.write_text("Keyword,Rank\nops consulting,14\n", encoding="utf-8")
+    conn = CsvConnector(engine=_engine(tmp_path))
     with pytest.raises(CsvImportError, match="names no domain"):
-        await CsvConnector(engine=_engine(tmp_path)).import_csv(csv_path, schema="rankings", site="")
+        await conn.import_csv(csv_path, schema="rankings", site="sc-domain:")
+    with pytest.raises(CsvImportError, match="--site is required"):
+        await conn.import_csv(csv_path, schema="rankings", site=" ")

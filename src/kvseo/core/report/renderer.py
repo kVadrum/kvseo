@@ -114,7 +114,7 @@ def _load(audit_id: uuid.UUID, engine: Engine) -> dict[str, Any]:
             if run.fetched_url
             else []
         )
-        demand = keyword_metrics(session, run.keyword) if run.keyword else []
+        demand = keyword_metrics(session, run.keyword, run.fetched_url) if run.keyword else []
     advisor = latest_run(audit_id, engine)
     gsc = _gsc(gsc_rows)
 
